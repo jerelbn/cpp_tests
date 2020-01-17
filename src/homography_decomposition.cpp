@@ -3,6 +3,7 @@
 Homography decomposition testing
 - this uses NED and camera coordinates
 - Deeper understanding of the homography decomposition for vision-based control - Malis, Vargas
+- NOTE: This does not handle special cases, such as pure rotation or translation along the plane normal
 
 */
 #include "common_cpp/common.h"
