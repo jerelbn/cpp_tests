@@ -6,7 +6,7 @@ if(NOT CMAKE_BUILD_TYPE)
   message(STATUS "Build type: Release")
   set(CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
-set(CMAKE_CXX_FLAGS "-std=c++14 -mavx2 -mfma -fopenmp")
+set(CMAKE_CXX_FLAGS "-std=c++11")
 
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -28,6 +28,14 @@ add_executable(homography_decomposition
   src/homography_decomposition.cpp
   )
 target_link_libraries(homography_decomposition
+  common_cpp
+  ${YAML_CPP_LIBRARIES}
+  )
+
+add_executable(rotation_from_two_images
+  src/rotation_from_two_images.cpp
+  )
+target_link_libraries(rotation_from_two_images
   common_cpp
   ${YAML_CPP_LIBRARIES}
   )
