@@ -4,6 +4,7 @@ Homography decomposition testing
 - this uses NED and camera coordinates
 - Deeper understanding of the homography decomposition for vision-based control - Malis, Vargas
 - NOTE: This does not handle special cases, such as pure rotation or translation along the plane normal
+- NOTE: This solution degrades as the ratio of camera translation to average feature depth decreases!
 
 */
 #include "common_cpp/common.h"
@@ -71,21 +72,21 @@ int main(int argc, char* argv[])
   for (size_t iter = 0; iter < num_iters; ++iter)
   {
     // Camera poses
-    double p1_n = -45 + 5.0*dist(rng);
+    double p1_n = -150 + 5.0*dist(rng);
     double p1_e = 5.0*dist(rng);
     double p1_d = 5.0*dist(rng);
 
-    double p1_r = 20.0*M_PI/180.0*dist(rng);
-    double p1_p = 20.0*M_PI/180.0*dist(rng);
-    double p1_y = 20.0*M_PI/180.0*dist(rng);
+    double p1_r = 5.0*M_PI/180.0*dist(rng);
+    double p1_p = 5.0*M_PI/180.0*dist(rng);
+    double p1_y = 5.0*M_PI/180.0*dist(rng);
 
-    double p2_n = -45 + 5.0*dist(rng);
+    double p2_n = -150 + 5.0*dist(rng);
     double p2_e = 5.0*dist(rng);
     double p2_d = 5.0*dist(rng);
 
-    double p2_r = 20.0*M_PI/180.0*dist(rng);
-    double p2_p = 20.0*M_PI/180.0*dist(rng);
-    double p2_y = 20.0*M_PI/180.0*dist(rng);
+    double p2_r = 5.0*M_PI/180.0*dist(rng);
+    double p2_p = 5.0*M_PI/180.0*dist(rng);
+    double p2_y = 5.0*M_PI/180.0*dist(rng);
 
     xform::Xformd x1, x2;
     x1.t() = Vector3d(p1_n, p1_e, p1_d);
@@ -112,7 +113,7 @@ int main(int argc, char* argv[])
     // Convert to Euclidean homography
     Matrix3d H = euclideanHomography(K, G);
 
-    // Decompose H into 8 possible solutions R, t, n
+    // Decompose H into 4 possible solutions R, t, n
     vector<Matrix3d, aligned_allocator<Matrix3d> > Rs;
     vector<Vector3d, aligned_allocator<Vector3d> > ns, ts;
     decomposeEuclideanHomography(H, Rs, ts, ns);
