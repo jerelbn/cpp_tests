@@ -15,11 +15,9 @@ find_package(yaml-cpp REQUIRED)
 # find_package(Ceres REQUIRED)
 
 add_subdirectory(lib/common_cpp)
-add_subdirectory(lib/geometry)
 
 include_directories(include
   lib/common_cpp/include
-  lib/geometry/include
   ${EIGEN3_INCLUDE_DIRS}
   ${YAML_CPP_INCLUDE_DIR}
   # ${OPENCV_INCLUDE_DIRS}
@@ -31,6 +29,5 @@ add_executable(homography_decomposition
   )
 target_link_libraries(homography_decomposition
   common_cpp
-  geometry
   ${YAML_CPP_LIBRARIES}
   )

@@ -7,14 +7,16 @@ Homography decomposition testing
 - NOTE: This solution degrades as the ratio of camera translation to average feature depth decreases!
 
 */
+#include <chrono>
 #include "common_cpp/common.h"
-#include "geometry/xform.h"
+#include "common_cpp/quaternion.h"
+#include "common_cpp/transform.h"
 
 using namespace std;
 using namespace Eigen;
 
-static const quat::Quatd q_cb2c = [] {
-  quat::Quatd q = quat::Quatd::from_euler(M_PI/2, 0, M_PI/2);
+static const common::Quaterniond q_cb2c = [] {
+  common::Quaterniond q(M_PI/2, 0, M_PI/2);
   return q;
 }();
 
@@ -32,10 +34,10 @@ struct Point
 };
 
 vector<Point> createInertialPoints(const unsigned& N, const double& bound);
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const xform::Xformd& x);
+vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x);
 void imagePointMatches(const vector<Point>& pts_1, const vector<Point>& pts_2, vector<Point>& matches_1, vector<Point>& matches_2);
 Matrix3d homographyFromPoints(const vector<Point>& matches_1, const vector<Point>& matches_2);
-Matrix3d homographyFromGeometry(const Matrix3d& K, const xform::Xformd& x1, const xform::Xformd& x2);
+Matrix3d homographyFromGeometry(const Matrix3d& K, const common::Transformd& x1, const common::Transformd& x2);
 Matrix3d euclideanHomography(const Matrix3d& K, const Matrix3d& G);
 void decomposeEuclideanHomography(const Matrix3d& H,
                                   vector<Matrix3d, aligned_allocator<Matrix3d> >& Rs,
@@ -53,8 +55,10 @@ void eliminateInvalidSolutions(const vector<Point>& pts, const Matrix3d& K,
 int main(int argc, char* argv[])
 {
   // Random parameters
-  std::default_random_engine rng(time(0));
-  std::uniform_real_distribution<double> dist(-1.0, 1.0);
+  auto t0 = chrono::high_resolution_clock::now();
+  size_t seed = time(0);
+  default_random_engine rng(seed);
+  uniform_real_distribution<double> dist(-1.0, 1.0);
 
   // Camera parameters
   double fx = 600;
@@ -71,6 +75,8 @@ int main(int argc, char* argv[])
   size_t num_bad_solutions = 0;
   for (size_t iter = 0; iter < num_iters; ++iter)
   {
+    cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << std::flush;
+
     // Camera poses
     double p1_n = -150 + 5.0*dist(rng);
     double p1_e = 5.0*dist(rng);
@@ -88,11 +94,11 @@ int main(int argc, char* argv[])
     double p2_p = 5.0*M_PI/180.0*dist(rng);
     double p2_y = 5.0*M_PI/180.0*dist(rng);
 
-    xform::Xformd x1, x2;
-    x1.t() = Vector3d(p1_n, p1_e, p1_d);
-    x2.t() = Vector3d(p2_n, p2_e, p2_d);
-    x1.q() = quat::Quatd::from_euler(p1_r, p1_p, p1_y);
-    x2.q() = quat::Quatd::from_euler(p2_r, p2_p, p2_y);
+    common::Transformd x1, x2;
+    x1.setP(Vector3d(p1_n, p1_e, p1_d));
+    x2.setP(Vector3d(p2_n, p2_e, p2_d));
+    x1.setQ(common::Quaterniond(p1_r, p1_p, p1_y));
+    x2.setQ(common::Quaterniond(p2_r, p2_p, p2_y));
 
     // Planar points (NED)
     // - N x N grid within +-bound in east and down directions
@@ -124,9 +130,9 @@ int main(int argc, char* argv[])
     // Check that true solution is in the resulting solution set
     double tol = 0.1;
     bool solution_obtained = false;
-    Matrix3d R = (q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c).R();
-    Vector3d t = q_cb2c.rotp(x2.q().rotp((x2.t() - x1.t()) / x1.t()(0)));
-    Vector3d n = q_cb2c.rotp(x1.q().rotp(common::e1));
+    Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
+    Vector3d t = q_cb2c.rot(x2.q().rot((x2.p() - x1.p()) / x1.p()(0)));
+    Vector3d n = q_cb2c.rot(x1.q().rot(common::e1));
     for (int i = 0; i < Rs.size(); ++i)
     {
       if ((R - Rs[i]).norm() < tol && (t - ts[i]).norm() < tol && (n - ns[i]).norm() < tol)
@@ -172,6 +178,8 @@ int main(int argc, char* argv[])
     }
   }
   cout << "\nNumber of bad solutions found: " << num_bad_solutions << " out of " << num_iters << " iterations." << "\n\n";
+  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count();
+  cout << "Time taken: " << tf*1e-6 << " seconds" << endl;
 
   return 0;
 }
@@ -205,13 +213,13 @@ vector<Point> createInertialPoints(const unsigned& N, const double& bound)
 }
 
 
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const xform::Xformd& x)
+vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x)
 {
   vector<Point> pts_img;
   for (const Point& pt_I : pts_I)
   {
     // Transform points into camera frame
-    Vector3d pt_c = q_cb2c.rotp(x.transformp(pt_I.vec3()));
+    Vector3d pt_c = q_cb2c.rot(x.transform(pt_I.vec3()));
 
     // Project points into image
     Vector2d pt_img;
@@ -282,11 +290,11 @@ Matrix3d homographyFromPoints(const vector<Point>& matches_1, const vector<Point
 }
 
 
-Matrix3d homographyFromGeometry(const Matrix3d& K, const xform::Xformd& x1, const xform::Xformd& x2)
+Matrix3d homographyFromGeometry(const Matrix3d& K, const common::Transformd& x1, const common::Transformd& x2)
 {
-  Matrix3d R = (q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c).R();
-  Vector3d t = q_cb2c.rotp(x2.q().rotp((x2.t() - x1.t()) / x1.t()(0)));
-  Vector3d n = q_cb2c.rotp(x1.q().rotp(common::e1));
+  Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
+  Vector3d t = q_cb2c.rot(x2.q().rot((x2.p() - x1.p()) / x1.p()(0)));
+  Vector3d n = q_cb2c.rot(x1.q().rot(common::e1));
 
   Matrix3d G = K * (R + t*n.transpose()) * K.inverse();
   G /= G(2,2);
@@ -336,12 +344,12 @@ void decomposeEuclideanHomography(const Matrix3d& H,
   double s23 = S(1,2);
   double s33 = S(2,2);
 
-  s11 = std::abs(s11) < 1e-6 ? 0 : s11;
-  s12 = std::abs(s12) < 1e-6 ? 0 : s12;
-  s13 = std::abs(s13) < 1e-6 ? 0 : s13;
-  s22 = std::abs(s22) < 1e-6 ? 0 : s22;
-  s23 = std::abs(s23) < 1e-6 ? 0 : s23;
-  s33 = std::abs(s33) < 1e-6 ? 0 : s33;
+  s11 = abs(s11) < 1e-6 ? 0 : s11;
+  s12 = abs(s12) < 1e-6 ? 0 : s12;
+  s13 = abs(s13) < 1e-6 ? 0 : s13;
+  s22 = abs(s22) < 1e-6 ? 0 : s22;
+  s23 = abs(s23) < 1e-6 ? 0 : s23;
+  s33 = abs(s33) < 1e-6 ? 0 : s33;
 
   double M_s11 = s23*s23 - s22*s33;
   double M_s22 = s13*s13 - s11*s33;
@@ -350,12 +358,12 @@ void decomposeEuclideanHomography(const Matrix3d& H,
   double M_s13 = s13*s22 - s12*s23;
   double M_s23 = s12*s13 - s11*s23;
 
-  M_s11 = std::abs(M_s11) < 1e-6 ? 0 : M_s11;
-  M_s22 = std::abs(M_s22) < 1e-6 ? 0 : M_s22;
-  M_s33 = std::abs(M_s33) < 1e-6 ? 0 : M_s33;
-  M_s12 = std::abs(M_s12) < 1e-6 ? 0 : M_s12;
-  M_s13 = std::abs(M_s13) < 1e-6 ? 0 : M_s13;
-  M_s23 = std::abs(M_s23) < 1e-6 ? 0 : M_s23;
+  M_s11 = abs(M_s11) < 1e-6 ? 0 : M_s11;
+  M_s22 = abs(M_s22) < 1e-6 ? 0 : M_s22;
+  M_s33 = abs(M_s33) < 1e-6 ? 0 : M_s33;
+  M_s12 = abs(M_s12) < 1e-6 ? 0 : M_s12;
+  M_s13 = abs(M_s13) < 1e-6 ? 0 : M_s13;
+  M_s23 = abs(M_s23) < 1e-6 ? 0 : M_s23;
 
   // Compute some common parameters
   double nu = 2.0 * sqrt(1.0 + S.trace() - M_s11 - M_s22 - M_s33);
@@ -364,7 +372,7 @@ void decomposeEuclideanHomography(const Matrix3d& H,
 
   // Compute possible solutions
   Vector3d na, nb, ta_star, tb_star;
-  if (std::abs(s11) > std::abs(s22) && std::abs(s11) > std::abs(s33))
+  if (abs(s11) > abs(s22) && abs(s11) > abs(s33))
   {
     // Plane normal
     na = Vector3d(s11, s12+sqrt(M_s33), s13+common::sign(M_s23)*sqrt(M_s22)).normalized();
@@ -374,7 +382,7 @@ void decomposeEuclideanHomography(const Matrix3d& H,
     ta_star = te/2.0*(common::sign(s11)*rho*nb - te*na);
     tb_star = te/2.0*(common::sign(s11)*rho*na - te*nb);
   }
-  else if (std::abs(s22) > std::abs(s11) && std::abs(s22) > std::abs(s33))
+  else if (abs(s22) > abs(s11) && abs(s22) > abs(s33))
   {
     // Plane normal
     na = Vector3d(s12+sqrt(M_s33), s22, s23-common::sign(M_s13)*sqrt(M_s11)).normalized();
