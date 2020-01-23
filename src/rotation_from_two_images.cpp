@@ -38,15 +38,15 @@ void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
                                 const common::Transformd& x1, const common::Transformd& x2,
                                 vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound);
 Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
-void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2, Matrix3d& R, double& lambda_min);
-Matrix3d Rcayley(const Vector3d& v);
-double minEigenvalueOfM(const Vector3d& v,
+void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+                             common::Quaterniond& q, double& lambda_min);
+double minEigenvalueOfM(const common::Quaterniond& q,
                         const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                         const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
+Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                       const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                       const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-Matrix3d secondDerivativeOfMinEigenvalueOfM(const Vector3d& v,
+Matrix3d secondDerivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                             const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
 
@@ -131,11 +131,12 @@ int main(int argc, char* argv[])
     if (matches_1.size() < 10) continue;
     // Matrix3d R_hat = rotationFromPointsHa(K, matches_1, matches_2);
 
-    Matrix3d R_hat;
     double lambda_min;
+    common::Quaterniond q_hat;
     auto t_calc_0 = std::chrono::high_resolution_clock::now();
-    rotationFromPointsKneip(K, matches_1, matches_2, R_hat, lambda_min);
+    rotationFromPointsKneip(K, matches_1, matches_2, q_hat, lambda_min);
     double dt_calc = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_calc_0).count()*1e-6;
+    Matrix3d R_hat = q_hat.R();
 
     // Compute true rotation and translation and rotation error
     Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
@@ -289,13 +290,13 @@ Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1,
 }
 
 
-void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2, Matrix3d& R, double& lambda_min)
+void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+                             common::Quaterniond& q, double& lambda_min)
 {
   static const int max_iters = 100;
   static const double exit_tol = 1e-5;
   static double lambda = 1.0; // Initial damping factor
   static const double lambda_adjust = 10.0;
-  static const double lambda_min_tol = 0.1;
 
   // Compute constants
   unsigned N = 2 * matches_1.size();
@@ -320,8 +321,8 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
   }
 
   // Find R(v) to minimize smallest eigenvalue of M
-  Vector3d v = Vector3d::Zero(); // Initial guess
-  Vector3d v_new, dl_dv, dl_dv_new, b, delta;
+  common::Quaterniond q_new;
+  Vector3d dl_dq, dl_dq_new, b, delta;
   Matrix3d J, H, A;
   bool prev_fail = false;
   for (int i = 0; i < max_iters; ++i)
@@ -329,21 +330,21 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
     // Calculate change in Cayley parameters
     if (!prev_fail)
     {
-      dl_dv = derivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
-      J = secondDerivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
+      dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      J = secondDerivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
       H = J.transpose()*J;
-      b = -J.transpose()*dl_dv;
+      b = -J.transpose()*dl_dq;
     }
     // A = H + lambda*Matrix3d(H.diagonal().asDiagonal());
     A = H + lambda*Matrix3d::Identity();
     delta = A.householderQr().solve(b);
 
     // Compute error with new parameters
-    v_new = v + delta;
-    dl_dv_new = derivativeOfMinEigenvalueOfM(v_new, Ax, Ay, Az, Axy, Axz, Ayz);
-    if (dl_dv_new.norm() < dl_dv.norm())
+    q_new = q + delta;
+    dl_dq_new = derivativeOfMinEigenvalueOfM(q_new, Ax, Ay, Az, Axy, Axz, Ayz);
+    if (dl_dq_new.norm() < dl_dq.norm())
     {
-      v = v_new;
+      q = q_new;
       lambda /= lambda_adjust;
       prev_fail = false;
     }
@@ -361,23 +362,16 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
       v = 0.1 * Vector3d::Random();
   }
   
-  R = Rcayley(v);
-  lambda_min = minEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
+  lambda_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
 }
 
 
-Matrix3d Rcayley(const Vector3d& v)
-{
-  return (2.0*(v*v.transpose() - common::skew(v)) + (1.0 - v.transpose()*v)*common::I_3x3) / (1.0 + v.norm()*v.norm());
-}
-
-
-double minEigenvalueOfM(const Vector3d& v,
+double minEigenvalueOfM(const common::Quaterniond& q,
                         const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                         const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
 {
   // Initial guess of rotation matrix from Cayley parameters
-  Matrix3d R = 2.0*(v*v.transpose() - common::skew(v)) + (1.0 - v.transpose()*v)*common::I_3x3;
+  Matrix3d R = q.R();
   Vector3d r1 = R.row(0);
   Vector3d r2 = R.row(1);
   Vector3d r3 = R.row(2);
@@ -407,12 +401,12 @@ double minEigenvalueOfM(const Vector3d& v,
 }
 
 
-Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
+Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                       const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                       const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
 {
   // Initial guess of rotation matrix from Cayley parameters
-  Matrix3d R = 2.0*(v*v.transpose() - common::skew(v)) + (1.0 - v.transpose()*v)*common::I_3x3;
+  Matrix3d R = q.R();
   Vector3d r1 = R.col(0);
   Vector3d r2 = R.col(1);
   Vector3d r3 = R.col(2);
@@ -439,16 +433,16 @@ Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
     C = pow((Delta1 - root2)/2.0, 1.0/3.0);
 
   // Derivatives
-  Matrix3d dr1_dv = 2.0*(v(0)*common::I_3x3 + v*common::e1.transpose() - common::skew(common::e1) - common::e1*v.transpose());
-  Matrix3d dr2_dv = 2.0*(v(1)*common::I_3x3 + v*common::e2.transpose() - common::skew(common::e2) - common::e2*v.transpose());
-  Matrix3d dr3_dv = 2.0*(v(2)*common::I_3x3 + v*common::e3.transpose() - common::skew(common::e3) - common::e3*v.transpose());
+  Matrix3d dr1_dq = common::skew(q.rot(common::e1));
+  Matrix3d dr2_dq = common::skew(q.rot(common::e2));
+  Matrix3d dr3_dq = common::skew(q.rot(common::e3));
 
-  RowVector3d dm11_dv = 2.0*((r2.transpose()*Az - r3.transpose()*Ayz)*dr2_dv + (r3.transpose()*Ay - r2.transpose()*Ayz)*dr3_dv);
-  RowVector3d dm22_dv = 2.0*((r1.transpose()*Az - r3.transpose()*Axz)*dr1_dv + (r3.transpose()*Ax - r1.transpose()*Axz)*dr3_dv);
-  RowVector3d dm33_dv = 2.0*((r1.transpose()*Ay - r2.transpose()*Axy)*dr1_dv + (r2.transpose()*Ax - r1.transpose()*Axy)*dr2_dv);
-  RowVector3d dm12_dv = (r3.transpose()*Ayz - r2.transpose()*Az)*dr1_dv + (r3.transpose()*Axz - r1.transpose()*Az)*dr2_dv + (r1.transpose()*Ayz - 2.0*r3.transpose()*Axy + r2.transpose()*Axz)*dr3_dv;
-  RowVector3d dm13_dv = (r2.transpose()*Ayz - r3.transpose()*Ay)*dr1_dv + (r2.transpose()*Axy - r1.transpose()*Ay)*dr3_dv + (r1.transpose()*Ayz - 2.0*r2.transpose()*Axz + r3.transpose()*Axy)*dr2_dv;
-  RowVector3d dm23_dv = (r1.transpose()*Axz - r3.transpose()*Ax)*dr2_dv + (r1.transpose()*Axy - r2.transpose()*Ax)*dr3_dv + (r2.transpose()*Axz - 2.0*r1.transpose()*Ayz + r3.transpose()*Axy)*dr1_dv;
+  RowVector3d dm11_dv = 2.0*((r2.transpose()*Az - r3.transpose()*Ayz)*dr2_dq + (r3.transpose()*Ay - r2.transpose()*Ayz)*dr3_dq);
+  RowVector3d dm22_dv = 2.0*((r1.transpose()*Az - r3.transpose()*Axz)*dr1_dq + (r3.transpose()*Ax - r1.transpose()*Axz)*dr3_dq);
+  RowVector3d dm33_dv = 2.0*((r1.transpose()*Ay - r2.transpose()*Axy)*dr1_dq + (r2.transpose()*Ax - r1.transpose()*Axy)*dr2_dq);
+  RowVector3d dm12_dv = (r3.transpose()*Ayz - r2.transpose()*Az)*dr1_dq + (r3.transpose()*Axz - r1.transpose()*Az)*dr2_dq + (r1.transpose()*Ayz - 2.0*r3.transpose()*Axy + r2.transpose()*Axz)*dr3_dq;
+  RowVector3d dm13_dv = (r2.transpose()*Ayz - r3.transpose()*Ay)*dr1_dq + (r2.transpose()*Axy - r1.transpose()*Ay)*dr3_dq + (r1.transpose()*Ayz - 2.0*r2.transpose()*Axz + r3.transpose()*Axy)*dr2_dq;
+  RowVector3d dm23_dv = (r1.transpose()*Axz - r3.transpose()*Ax)*dr2_dq + (r1.transpose()*Axy - r2.transpose()*Ax)*dr3_dq + (r2.transpose()*Axz - 2.0*r1.transpose()*Ayz + r3.transpose()*Axy)*dr1_dq;
 
   RowVector3cd db_dv = -(dm11_dv + dm22_dv + dm33_dv);
   RowVector3d dc_dv = (m22 + m33)*dm11_dv + (m11 + m33)*dm22_dv + (m11 + m22)*dm33_dv - 2.0*(m12*dm12_dv + m13*dm13_dv + m23*dm23_dv);
@@ -466,19 +460,19 @@ Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
 }
 
 // TODO: Try complex step derivative
-Matrix3d secondDerivativeOfMinEigenvalueOfM(const Vector3d& v,
+Matrix3d secondDerivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                             const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
 {
   static const double eps = 1e-5;
-  Matrix3d ddl_ddv;
+  Matrix3d ddl_ddq;
   for (int i = 0; i < 3; ++i)
   {
-    Vector3d vp = v + eps * common::I_3x3.col(i);
-    Vector3d vm = v - eps * common::I_3x3.col(i);
-    Vector3d dlam_p = derivativeOfMinEigenvalueOfM(vp, Ax, Ay, Az, Axy, Axz, Ayz);
-    Vector3d dlam_m = derivativeOfMinEigenvalueOfM(vm, Ax, Ay, Az, Axy, Axz, Ayz);
-    ddl_ddv.col(i) = (dlam_p - dlam_m)/(2.0*eps);
+    common::Quaterniond qp = q + eps * common::I_3x3.col(i);
+    common::Quaterniond qm = q + -eps * common::I_3x3.col(i);
+    Vector3d dlam_p = derivativeOfMinEigenvalueOfM(qp, Ax, Ay, Az, Axy, Axz, Ayz);
+    Vector3d dlam_m = derivativeOfMinEigenvalueOfM(qm, Ax, Ay, Az, Axy, Axz, Ayz);
+    ddl_ddq.col(i) = (dlam_p - dlam_m)/(2.0*eps);
   }
-  return ddl_ddv;
+  return ddl_ddq;
 }
