@@ -57,9 +57,10 @@ int main(int argc, char* argv[])
 {
   // Random parameters
   auto t0 = chrono::high_resolution_clock::now();
-  size_t seed = 0;//time(0);
+  size_t seed = time(0);
   default_random_engine rng(seed);
   uniform_real_distribution<double> dist(-1.0, 1.0);
+  srand(seed);
 
   // Camera parameters
   double fx = 600;
@@ -77,11 +78,13 @@ int main(int argc, char* argv[])
   double zI_offset = 1500;
   const unsigned N = 51; // number of points along single grid line
   const double bound = zI_offset*tan(half_fov_x+M_PI/6.0);
-  const double pix_noise_bound = 0.5; // pixels
+  const double pix_noise_bound = 1.0; // pixels
+  const double trans_err = 10.0;
+  const double rot_err = 5.0;
 
-  size_t num_iters = 1000;
+  size_t num_iters = 10000;
   size_t num_bad_iters = 0;
-  double error_tol = 1.0; // degrees
+  double error_tol = 3.0; // degrees
   double dt_calc_mean = 0.0; // seconds
   double dt_calc_var = 0.0; // seconds
   double error_mean = 0.0; // degrees
@@ -96,21 +99,21 @@ int main(int argc, char* argv[])
     cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
 
     // Camera poses
-    double p1_n = -zI_offset + 5.0*dist(rng);
-    double p1_e = 5.0*dist(rng);
-    double p1_d = 5.0*dist(rng);
+    double p1_n = -zI_offset + trans_err*dist(rng);
+    double p1_e = trans_err*dist(rng);
+    double p1_d = trans_err*dist(rng);
 
-    double p1_r = 5.0*M_PI/180.0*dist(rng);
-    double p1_p = 5.0*M_PI/180.0*dist(rng);
-    double p1_y = 5.0*M_PI/180.0*dist(rng);
+    double p1_r = rot_err*M_PI/180.0*dist(rng);
+    double p1_p = rot_err*M_PI/180.0*dist(rng);
+    double p1_y = rot_err*M_PI/180.0*dist(rng);
 
-    double p2_n = -zI_offset + 5.0*dist(rng);
-    double p2_e = 5.0*dist(rng);
-    double p2_d = 5.0*dist(rng);
+    double p2_n = -zI_offset + trans_err*dist(rng);
+    double p2_e = trans_err*dist(rng);
+    double p2_d = trans_err*dist(rng);
 
-    double p2_r = 5.0*M_PI/180.0*dist(rng);
-    double p2_p = 5.0*M_PI/180.0*dist(rng);
-    double p2_y = 5.0*M_PI/180.0*dist(rng);
+    double p2_r = rot_err*M_PI/180.0*dist(rng);
+    double p2_p = rot_err*M_PI/180.0*dist(rng);
+    double p2_y = rot_err*M_PI/180.0*dist(rng);
 
     common::Transformd x1, x2;
     x1.setP(Vector3d(p1_n, p1_e, p1_d));
@@ -351,6 +354,11 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
     }
 
     if (delta.norm() < exit_tol) break;
+
+    // Try restarting at random value if rotation > some threshold
+    double rot_mag = common::wrapAngle(common::vex(common::logR(Rcayley(v))).norm(), M_PI);
+    if (rot_mag > 60*M_PI/180)
+      v = 0.1 * Vector3d::Random();
   }
   
   R = Rcayley(v);
