@@ -136,38 +136,37 @@ int main(int argc, char* argv[])
     auto t_calc_0 = std::chrono::high_resolution_clock::now();
     rotationFromPointsKneip(K, matches_1, matches_2, q_hat, lambda_min);
     double dt_calc = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_calc_0).count()*1e-6;
-    Matrix3d R_hat = q_hat.R();
 
     // Compute true rotation and translation and rotation error
-    Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
+    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
     Vector3d t = x2.p() - x1.p();
-    double R_error = common::logR(Matrix3d(R.transpose()*R_hat)).norm()*180/M_PI; // degrees
+    double rot_error = common::Quaterniond::log(q.inv()*q_hat).norm();
 
     // Show debug output if solution is not close enough to truth
-    if (R_error > error_tol)
+    if (rot_error*180/M_PI > error_tol)
     {
       ++num_bad_iters;
       cout << "\n\n";
       cout << "           Calc time taken: " << dt_calc << " seconds\n";
-      cout << "   True rotation magnitude: " << common::vex(common::logR(R)).norm()*180/M_PI << " degrees\n";
+      cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
       cout << "True translation magnitude: " << t.norm() << " meters\n";
-      cout << "                     Error: " << R_error << " degrees\n";
+      cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
       cout << "              lambda_M_min: " << lambda_min << "\n";
       cout << "   Number of point matches: " << matches_1.size() << "\n\n";
-      cout << "R_hat =  \n" << R_hat << "\n\n";
-      cout << "R_true = \n" << R << "\n\n";
+      cout << "R_hat =  \n" << q_hat.R() << "\n\n";
+      cout << "R_true = \n" << q.R() << "\n\n";
       continue; // Bad solutions aren't useful in the following statistics
     }
 
     // Recursive error and variance of things
     dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
-    error_mean = (n_stats*error_mean + R_error)/(n_stats+1);
+    error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
     lambda_min_mean = (n_stats*lambda_min_mean + lambda_min)/(n_stats+1);
     match_pts_mean = (n_stats*match_pts_mean + matches_1.size())/(n_stats+1);
     if (n_stats > 0)
     {
       dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
-      error_var = ((n_stats-1)*error_var + pow(R_error - error_mean, 2.0))/n_stats;
+      error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
       lambda_min_var = ((n_stats-1)*lambda_min_var + pow(lambda_min - lambda_min_mean, 2.0))/n_stats;
       match_pts_var = ((n_stats-1)*match_pts_var + pow(matches_1.size() - match_pts_mean, 2.0))/n_stats;
     }
@@ -357,9 +356,9 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
     if (delta.norm() < exit_tol) break;
 
     // Try restarting at random value if rotation > some threshold
-    double rot_mag = common::wrapAngle(common::vex(common::logR(Rcayley(v))).norm(), M_PI);
+    double rot_mag = common::Quaterniond::log(q).norm();
     if (rot_mag > 60*M_PI/180)
-      v = 0.1 * Vector3d::Random();
+      q = common::Quaterniond::exp(10*M_PI/180 * Vector3d::Random());
   }
   
   lambda_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
