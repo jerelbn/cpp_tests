@@ -37,9 +37,8 @@ vector<Point> createInertialPoints(const unsigned& N, const double& bound);
 void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
                                 const common::Transformd& x1, const common::Transformd& x2,
                                 vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound);
-Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
-void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
-                             common::Quaterniond& q, double& lambda_min);
+common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
+common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
 double minEigenvalueOfM(const common::Quaterniond& q,
                         const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                         const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
@@ -75,20 +74,26 @@ int main(int argc, char* argv[])
   double half_fov_x = atan(cx/fx);
   double half_fov_y = atan(cy/fy);
 
+  // solver:
+  // - 0: Ha solver
+  // - 1: Kneip solver
+  // - 2: Kneip solver w/ RANSAC
+  int solver = 1;
+
   double zI_offset = 1500;
-  const unsigned N = 51; // number of points along single grid line
-  const double bound = zI_offset*tan(half_fov_x+M_PI/6.0);
+  const unsigned N = 41; // number of points along single grid line
+  const double bound = zI_offset*tan(half_fov_x+30*M_PI/180);
   const double pix_noise_bound = 1.0; // pixels
-  const double trans_err = 10.0;
-  const double rot_err = 5.0;
+  const double trans_err = 0.0;
+  const double rot_err = 2.0;
 
   size_t num_iters = 10000;
   size_t num_bad_iters = 0;
-  double error_tol = 3.0; // degrees
+  double error_tol = 5.0*M_PI/180;
   double dt_calc_mean = 0.0; // seconds
   double dt_calc_var = 0.0; // seconds
-  double error_mean = 0.0; // degrees
-  double error_var = 0.0; // degrees
+  double error_mean = 0.0;
+  double error_var = 0.0;
   double lambda_min_mean = 0.0;
   double lambda_min_var = 0.0;
   double match_pts_mean = 0.0;
@@ -129,12 +134,15 @@ int main(int argc, char* argv[])
     vector<Point> matches_1, matches_2;
     projectAndMatchImagePoints(K, pts_I, x1, x2, matches_1, matches_2, pix_noise_bound);
     if (matches_1.size() < 10) continue;
-    // Matrix3d R_hat = rotationFromPointsHa(K, matches_1, matches_2);
 
-    double lambda_min;
     common::Quaterniond q_hat;
     auto t_calc_0 = std::chrono::high_resolution_clock::now();
-    rotationFromPointsKneip(K, matches_1, matches_2, q_hat, lambda_min);
+    if (solver == 0)
+      q_hat = rotationFromPointsHa(K, matches_1, matches_2);
+    else if (solver == 1)
+      q_hat = rotationFromPointsKneip(K, matches_1, matches_2);
+    else
+      throw std::runtime_error("Select an existing solver!");
     double dt_calc = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_calc_0).count()*1e-6;
 
     // Compute true rotation and translation and rotation error
@@ -143,7 +151,7 @@ int main(int argc, char* argv[])
     double rot_error = common::Quaterniond::log(q.inv()*q_hat).norm();
 
     // Show debug output if solution is not close enough to truth
-    if (rot_error*180/M_PI > error_tol)
+    if (rot_error > error_tol)
     {
       ++num_bad_iters;
       cout << "\n\n";
@@ -151,7 +159,6 @@ int main(int argc, char* argv[])
       cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
       cout << "True translation magnitude: " << t.norm() << " meters\n";
       cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
-      cout << "              lambda_M_min: " << lambda_min << "\n";
       cout << "   Number of point matches: " << matches_1.size() << "\n\n";
       cout << "R_hat =  \n" << q_hat.R() << "\n\n";
       cout << "R_true = \n" << q.R() << "\n\n";
@@ -161,24 +168,21 @@ int main(int argc, char* argv[])
     // Recursive error and variance of things
     dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
     error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
-    lambda_min_mean = (n_stats*lambda_min_mean + lambda_min)/(n_stats+1);
     match_pts_mean = (n_stats*match_pts_mean + matches_1.size())/(n_stats+1);
     if (n_stats > 0)
     {
       dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
       error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
-      lambda_min_var = ((n_stats-1)*lambda_min_var + pow(lambda_min - lambda_min_mean, 2.0))/n_stats;
       match_pts_var = ((n_stats-1)*match_pts_var + pow(matches_1.size() - match_pts_mean, 2.0))/n_stats;
     }
     ++n_stats;
   }
   auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count()*1e-6;
   cout << "        Total time taken: " << tf << " seconds\n";
-  cout << "         Error tolerance: " << error_tol << " degrees\n";
+  cout << "         Error tolerance: " << error_tol*180/M_PI << " degrees\n";
   cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
   cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
-  cout << "     Error (mean, stdev): (" << error_mean << ", " << sqrt(error_var) << ") degrees\n";
-  cout << "lambda_min (mean, stdev): (" << lambda_min_mean << ", " << sqrt(lambda_min_var) << ")\n";
+  cout << "     Error (mean, stdev): (" << error_mean*180/M_PI << ", " << sqrt(error_var)*180/M_PI << ") degrees\n";
   cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
 
   return 0;
@@ -245,7 +249,7 @@ void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
 }
 
 
-Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
+common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
 {
   // Unpack camera intrinsic parameters
   double fx = K(0,0);
@@ -281,21 +285,25 @@ Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1,
     b(idx2) = fx*fy*(p2.y - p1.y);
   }
 
-  // Solve for apporximate rotation vector and build rotation matrix
+  // Solve for apporximate rotation vector
   Vector3d r = A.householderQr().solve(b);
-  Matrix3d R = common::expR(common::skew(r));
   
-  return R;
+  // -r because the algorithm is based on a rotation matrix and quaternions are opposite rotations
+  return common::Quaterniond::exp(-r);
 }
 
 
-void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
-                             common::Quaterniond& q, double& lambda_min)
+common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
 {
   static const int max_iters = 100;
   static const double exit_tol = 1e-5;
   static double lambda = 1.0; // Initial damping factor
   static const double lambda_adjust = 10.0;
+  static const double random_factor = 2*M_PI/180;
+
+  // Initialize assuming small ratio of translation to landmark distance (Ha paper)
+  common::Quaterniond q0 = rotationFromPointsHa(K, matches_1, matches_2);
+  common::Quaterniond q = q0;
 
   // Compute constants
   unsigned N = 2 * matches_1.size();
@@ -358,10 +366,10 @@ void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, 
     // Try restarting at random value if rotation > some threshold
     double rot_mag = common::Quaterniond::log(q).norm();
     if (rot_mag > 60*M_PI/180)
-      q = common::Quaterniond::exp(10*M_PI/180 * Vector3d::Random());
+      q = q0 + random_factor * Vector3d::Random();
   }
-  
-  lambda_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+
+  return q; 
 }
 
 
