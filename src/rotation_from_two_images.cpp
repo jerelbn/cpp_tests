@@ -34,10 +34,11 @@ struct Point
 };
 
 vector<Point> createInertialPoints(const unsigned& N, const double& bound);
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x);
-void imagePointMatches(const vector<Point>& pts_1, const vector<Point>& pts_2, vector<Point>& matches_1, vector<Point>& matches_2);
+void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
+                                const common::Transformd& x1, const common::Transformd& x2,
+                                vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound);
 Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
-Matrix3d rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
+void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2, Matrix3d& R, double& lambda_min);
 Matrix3d Rcayley(const Vector3d& v);
 double minEigenvalueOfM(const Vector3d& v,
                         const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
@@ -56,7 +57,7 @@ int main(int argc, char* argv[])
 {
   // Random parameters
   auto t0 = chrono::high_resolution_clock::now();
-  size_t seed = time(0);
+  size_t seed = 0;//time(0);
   default_random_engine rng(seed);
   uniform_real_distribution<double> dist(-1.0, 1.0);
 
@@ -72,11 +73,24 @@ int main(int argc, char* argv[])
   K(1,2) = cy;
   double half_fov_x = atan(cx/fx);
   double half_fov_y = atan(cy/fy);
-  double zI_offset = 1500;
 
-  size_t num_iters = 1;
+  double zI_offset = 1500;
+  const unsigned N = 51; // number of points along single grid line
+  const double bound = zI_offset*tan(half_fov_x+M_PI/6.0);
+  const double pix_noise_bound = 0.5; // pixels
+
+  size_t num_iters = 1000;
   size_t num_bad_iters = 0;
-  double error_tol = 2.0; // degrees
+  double error_tol = 1.0; // degrees
+  double dt_calc_mean = 0.0; // seconds
+  double dt_calc_var = 0.0; // seconds
+  double error_mean = 0.0; // degrees
+  double error_var = 0.0; // degrees
+  double lambda_min_mean = 0.0;
+  double lambda_min_var = 0.0;
+  double match_pts_mean = 0.0;
+  double match_pts_var = 0.0;
+  size_t n_stats = 0;
   for (size_t iter = 0; iter < num_iters; ++iter)
   {
     cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
@@ -106,21 +120,19 @@ int main(int argc, char* argv[])
 
     // Planar points (NED)
     // - N x N grid within +-bound in east and down directions
-    const unsigned N = 101;
-    const double bound = zI_offset*tan(half_fov_x);
     vector<Point> pts_I = createInertialPoints(N, bound);
 
-    // Project points into each camera image
-    vector<Point> pts_1 = projectPointsToImage(K, pts_I, x1);
-    vector<Point> pts_2 = projectPointsToImage(K, pts_I, x2);
-
-    // Compute rotation from matched image points
-    vector<Point> matches_1; matches_1.reserve(N);
-    vector<Point> matches_2; matches_2.reserve(N);
-    imagePointMatches(pts_1, pts_2, matches_1, matches_2);
+    // Project matching points into each camera image
+    vector<Point> matches_1, matches_2;
+    projectAndMatchImagePoints(K, pts_I, x1, x2, matches_1, matches_2, pix_noise_bound);
     if (matches_1.size() < 10) continue;
     // Matrix3d R_hat = rotationFromPointsHa(K, matches_1, matches_2);
-    Matrix3d R_hat = rotationFromPointsKneip(K, matches_1, matches_2);
+
+    Matrix3d R_hat;
+    double lambda_min;
+    auto t_calc_0 = std::chrono::high_resolution_clock::now();
+    rotationFromPointsKneip(K, matches_1, matches_2, R_hat, lambda_min);
+    double dt_calc = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t_calc_0).count()*1e-6;
 
     // Compute true rotation and translation and rotation error
     Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
@@ -132,17 +144,39 @@ int main(int argc, char* argv[])
     {
       ++num_bad_iters;
       cout << "\n\n";
-      cout << "True rotation magnitude =    " << common::vex(common::logR(R)).norm()*180/M_PI << " degrees\n";
-      cout << "True translation magnitude = " << t.norm() << " meters\n";
-      cout << "Error =                      " << R_error << " degrees\n\n";
+      cout << "           Calc time taken: " << dt_calc << " seconds\n";
+      cout << "   True rotation magnitude: " << common::vex(common::logR(R)).norm()*180/M_PI << " degrees\n";
+      cout << "True translation magnitude: " << t.norm() << " meters\n";
+      cout << "                     Error: " << R_error << " degrees\n";
+      cout << "              lambda_M_min: " << lambda_min << "\n";
+      cout << "   Number of point matches: " << matches_1.size() << "\n\n";
       cout << "R_hat =  \n" << R_hat << "\n\n";
       cout << "R_true = \n" << R << "\n\n";
+      continue; // Bad solutions aren't useful in the following statistics
     }
+
+    // Recursive error and variance of things
+    dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
+    error_mean = (n_stats*error_mean + R_error)/(n_stats+1);
+    lambda_min_mean = (n_stats*lambda_min_mean + lambda_min)/(n_stats+1);
+    match_pts_mean = (n_stats*match_pts_mean + matches_1.size())/(n_stats+1);
+    if (n_stats > 0)
+    {
+      dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
+      error_var = ((n_stats-1)*error_var + pow(R_error - error_mean, 2.0))/n_stats;
+      lambda_min_var = ((n_stats-1)*lambda_min_var + pow(lambda_min - lambda_min_mean, 2.0))/n_stats;
+      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches_1.size() - match_pts_mean, 2.0))/n_stats;
+    }
+    ++n_stats;
   }
-  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count();
-  cout << "Time taken: " << tf*1e-6 << " seconds" << endl;
-  cout << "Error tolerance: " << error_tol << " degrees\n";
+  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count()*1e-6;
+  cout << "        Total time taken: " << tf << " seconds\n";
+  cout << "         Error tolerance: " << error_tol << " degrees\n";
   cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
+  cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
+  cout << "     Error (mean, stdev): (" << error_mean << ", " << sqrt(error_var) << ") degrees\n";
+  cout << "lambda_min (mean, stdev): (" << lambda_min_mean << ", " << sqrt(lambda_min_var) << ")\n";
+  cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
 
   return 0;
 }
@@ -176,42 +210,33 @@ vector<Point> createInertialPoints(const unsigned& N, const double& bound)
 }
 
 
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x)
+void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
+                                const common::Transformd& x1, const common::Transformd& x2,
+                                vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound)
 {
-  vector<Point> pts_img;
+  pts1.clear();
+  pts2.clear();
+  double image_size_x = 2*K(0,2);
+  double image_size_y = 2*K(1,2);
   for (const Point& pt_I : pts_I)
   {
     // Transform points into camera frame
-    Vector3d pt_c = q_cb2c.rot(x.transform(pt_I.vec3()));
+    Vector3d pt_c1 = q_cb2c.rot(x1.transform(pt_I.vec3()));
+    Vector3d pt_c2 = q_cb2c.rot(x2.transform(pt_I.vec3()));
 
     // Project points into image
-    Vector2d pt_img;
-    common::projToImg(pt_img, pt_c, K);
+    Vector2d pt_img1, pt_img2;
+    common::projToImg(pt_img1, pt_c1, K);
+    common::projToImg(pt_img2, pt_c2, K);
+    pt_img1 += pix_noise_bound*Vector2d::Random();
+    pt_img2 += pix_noise_bound*Vector2d::Random();
 
     // Save image points inside image bounds
-    if (pt_img(0) >= 0 && pt_img(1) >= 0 && pt_img(0) <= 2*K(0,2) && pt_img(1) <= 2*K(1,2))
-      pts_img.push_back(Point(pt_img(0), pt_img(1), 1, pt_I.id));
-  }
-
-  return pts_img;
-}
-
-
-void imagePointMatches(const vector<Point>& pts_1, const vector<Point>& pts_2, vector<Point>& matches_1, vector<Point>& matches_2)
-{
-  // Collect points with matching ids
-  matches_1.clear();
-  matches_2.clear();
-  for (const auto& p1 : pts_1)
-  {
-    for (const auto& p2 : pts_2)
+    if (pt_img1(0) >= 0 && pt_img1(1) >= 0 && pt_img1(0) <= image_size_x && pt_img1(1) <= image_size_y &&
+        pt_img2(0) >= 0 && pt_img2(1) >= 0 && pt_img2(0) <= image_size_x && pt_img2(1) <= image_size_y)
     {
-      if (p1.id == p2.id)
-      {
-        matches_1.push_back(p1);
-        matches_2.push_back(p2);
-        break;
-      }
+      pts1.push_back(Point(pt_img1(0), pt_img1(1), 1, pt_I.id));
+      pts2.push_back(Point(pt_img2(0), pt_img2(1), 1, pt_I.id));
     }
   }
 }
@@ -261,8 +286,14 @@ Matrix3d rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1,
 }
 
 
-Matrix3d rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
+void rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2, Matrix3d& R, double& lambda_min)
 {
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-5;
+  static double lambda = 1.0; // Initial damping factor
+  static const double lambda_adjust = 10.0;
+  static const double lambda_min_tol = 0.1;
+
   // Compute constants
   unsigned N = 2 * matches_1.size();
   Matrix3d K_inv = K.inverse();
@@ -286,19 +317,44 @@ Matrix3d rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches
   }
 
   // Find R(v) to minimize smallest eigenvalue of M
-  Vector3d v = Vector3d::Zero();
-  for (int i = 0; i < 10; ++i)
+  Vector3d v = Vector3d::Zero(); // Initial guess
+  Vector3d v_new, dl_dv, dl_dv_new, b, delta;
+  Matrix3d J, H, A;
+  bool prev_fail = false;
+  for (int i = 0; i < max_iters; ++i)
   {
-    Vector3d dl_dv = derivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
-    Matrix3d J = secondDerivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
-    Matrix3d A = J.transpose()*J;
-    Vector3d b = -J.transpose()*dl_dv;
-    Vector3d delta = A.householderQr().solve(b);
+    // Calculate change in Cayley parameters
+    if (!prev_fail)
+    {
+      dl_dv = derivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
+      J = secondDerivativeOfMinEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
+      H = J.transpose()*J;
+      b = -J.transpose()*dl_dv;
+    }
+    // A = H + lambda*Matrix3d(H.diagonal().asDiagonal());
+    A = H + lambda*Matrix3d::Identity();
+    delta = A.householderQr().solve(b);
 
-    v += delta;
+    // Compute error with new parameters
+    v_new = v + delta;
+    dl_dv_new = derivativeOfMinEigenvalueOfM(v_new, Ax, Ay, Az, Axy, Axz, Ayz);
+    if (dl_dv_new.norm() < dl_dv.norm())
+    {
+      v = v_new;
+      lambda /= lambda_adjust;
+      prev_fail = false;
+    }
+    else
+    {
+      lambda *= lambda_adjust;
+      prev_fail = true;
+    }
+
+    if (delta.norm() < exit_tol) break;
   }
   
-  return Rcayley(v);
+  R = Rcayley(v);
+  lambda_min = minEigenvalueOfM(v, Ax, Ay, Az, Axy, Axz, Ayz);
 }
 
 
@@ -344,14 +400,14 @@ double minEigenvalueOfM(const Vector3d& v,
 
 
 Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
-                                    const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
-                                    const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
+                                      const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
+                                      const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
 {
   // Initial guess of rotation matrix from Cayley parameters
   Matrix3d R = 2.0*(v*v.transpose() - common::skew(v)) + (1.0 - v.transpose()*v)*common::I_3x3;
-  Vector3d r1 = R.row(0);
-  Vector3d r2 = R.row(1);
-  Vector3d r3 = R.row(2);
+  Vector3d r1 = R.col(0);
+  Vector3d r2 = R.col(1);
+  Vector3d r3 = R.col(2);
 
   // Components of minimum eigenvalue of M
   double m11 = r2.dot(Az*r2) + r3.dot(Ay*r3) - 2.0*r3.dot(Ayz*r2);
@@ -401,6 +457,7 @@ Vector3d derivativeOfMinEigenvalueOfM(const Vector3d& v,
   return (-1.0/3.0*(db_dv + dDelta0_dv/C + (1.0 - Delta0/(C*C))*dC_dv)).real();
 }
 
+// TODO: Try complex step derivative
 Matrix3d secondDerivativeOfMinEigenvalueOfM(const Vector3d& v,
                                             const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
