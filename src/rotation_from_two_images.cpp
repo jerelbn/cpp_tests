@@ -42,179 +42,6 @@ struct Match
   Point p1, p2;
 };
 
-vector<Point> createInertialPoints(const unsigned& N, const double& bound);
-void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
-                                const common::Transformd& x1, const common::Transformd& x2,
-                                const double& pix_noise_bound, const double& matched_pts_inlier_ratio,
-                                vector<Match>& matches);
-common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches);
-common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Match>& matches);
-common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vector<Match>& matches);
-void matrixMconstants(const Matrix3d& K, const vector<Match>& matches,
-                      Matrix3d& Ax,  Matrix3d& Ay,  Matrix3d& Az,
-                      Matrix3d& Axy, Matrix3d& Axz, Matrix3d& Ayz);
-void kneipLM(common::Quaterniond& q, 
-             const int& max_iters, const double& exit_tol, const double& lambda0,
-             const double& lambda_adjust, const double& restart_variation,
-             const Matrix3d& K, const vector<Match>& matches,
-             const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
-             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-double minEigenvalueOfM(const common::Quaterniond& q,
-                        const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
-                        const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
-                                      const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
-                                      const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-Matrix3d secondDerivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
-                                            const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
-                                            const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
-
-
-/*================================= MAIN =================================*/
-
-int main(int argc, char* argv[])
-{
-  // Random parameters
-  auto t0 = high_resolution_clock::now();
-  size_t seed = 0;//time(0);
-  default_random_engine rng(seed);
-  uniform_real_distribution<double> dist(-1.0, 1.0);
-  srand(seed);
-
-  // Camera parameters
-  double cx = 320;
-  double cy = 240;
-  double half_fov_x = 3.0*M_PI/180.0;
-  double half_fov_y = cy/cx*half_fov_x;
-  double fx = cx/tan(half_fov_x);
-  double fy = cy/tan(half_fov_y);
-  Matrix3d K = Matrix3d::Identity();
-  K(0,0) = fx;
-  K(1,1) = fy;
-  K(0,2) = cx;
-  K(1,2) = cy;
-
-  // solver:
-  // - 0: Ha solver
-  // - 1: Kneip solver
-  // - 2: Kneip solver w/ RANSAC
-  int solver = 2;
-
-  double zI_offset = 2000;
-  const unsigned N = 31; // number of points along single grid line
-  const double pix_noise_bound = 0.5; // pixels
-  const double trans_err = 5.0;
-  const double rot_err = 3.0;
-  const double matched_pts_inlier_ratio = 0.8;
-  const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
-
-  size_t num_iters = 1;
-  size_t num_bad_iters = 0;
-  double error_tol = 0.0*M_PI/180;
-  double dt_calc_mean = 0.0; // seconds
-  double dt_calc_var = 0.0; // seconds
-  double error_mean = 0.0;
-  double error_var = 0.0;
-  double lambda_min_mean = 0.0;
-  double lambda_min_var = 0.0;
-  double match_pts_mean = 0.0;
-  double match_pts_var = 0.0;
-  size_t n_stats = 0;
-  for (size_t iter = 0; iter < num_iters; ++iter)
-  {
-    cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
-
-    // Camera poses
-    double p1_n = -zI_offset + trans_err*dist(rng);
-    double p1_e = trans_err*dist(rng);
-    double p1_d = trans_err*dist(rng);
-
-    double p1_r = rot_err*M_PI/180.0*dist(rng);
-    double p1_p = rot_err*M_PI/180.0*dist(rng);
-    double p1_y = rot_err*M_PI/180.0*dist(rng);
-
-    double p2_n = -zI_offset + trans_err*dist(rng);
-    double p2_e = trans_err*dist(rng);
-    double p2_d = trans_err*dist(rng);
-
-    double p2_r = rot_err*M_PI/180.0*dist(rng);
-    double p2_p = rot_err*M_PI/180.0*dist(rng);
-    double p2_y = rot_err*M_PI/180.0*dist(rng);
-
-    common::Transformd x1, x2;
-    x1.setP(Vector3d(p1_n, p1_e, p1_d));
-    x2.setP(Vector3d(p2_n, p2_e, p2_d));
-    x1.setQ(common::Quaterniond(p1_r, p1_p, p1_y));
-    x2.setQ(common::Quaterniond(p2_r, p2_p, p2_y));
-
-    // Planar points (NED)
-    // - N x N grid within +-bound in east and down directions
-    vector<Point> pts_I = createInertialPoints(N, bound);
-
-    // Project matching points into each camera image
-    vector<Match> matches;
-    projectAndMatchImagePoints(K, pts_I, x1, x2, pix_noise_bound, matched_pts_inlier_ratio, matches);
-    if (matches.size() < 2)
-    {
-      --iter; // Try that iteration again
-      continue;
-    }
-
-    common::Quaterniond q_hat;
-    auto t_calc_0 = high_resolution_clock::now();
-    if (solver == 0)
-      q_hat = rotationFromPointsHa(K, matches);
-    else if (solver == 1)
-      q_hat = rotationFromPointsKneip(K, matches);
-    else if (solver == 2)
-      q_hat = rotationFromPointsKneipRANSAC(K, matches);
-    else
-      throw runtime_error("Select an existing solver!");
-    double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
-
-    // Compute true rotation and translation and rotation error
-    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
-    Vector3d t = x2.p() - x1.p();
-    double rot_error = common::Quaterniond::log(q.inv()*q_hat).norm();
-
-    // Show debug output if solution is not close enough to truth
-    if (rot_error > error_tol)
-    {
-      ++num_bad_iters;
-      cout << "\n\n";
-      cout << "           Calc time taken: " << dt_calc << " seconds\n";
-      cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
-      cout << "True translation magnitude: " << t.norm() << " meters\n";
-      cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
-      cout << "   Number of point matches: " << matches.size() << "\n";
-      cout << "                       q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
-      cout << "                     q_hat: " << q_hat.toEigen().transpose() << "\n";
-      cout << "                    q_true: " << q.toEigen().transpose() << "\n\n";
-      continue; // Bad solutions aren't useful in the following statistics
-    }
-
-    // Recursive error and variance of things
-    dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
-    error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
-    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
-    if (n_stats > 0)
-    {
-      dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
-      error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
-      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
-    }
-    ++n_stats;
-  }
-  auto tf = duration_cast<microseconds>(high_resolution_clock::now() - t0).count()*1e-6;
-  cout << "        Total time taken: " << tf << " seconds\n";
-  cout << "         Error tolerance: " << error_tol*180/M_PI << " degrees\n";
-  cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
-  cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
-  cout << "     Error (mean, stdev): (" << error_mean*180/M_PI << ", " << sqrt(error_var)*180/M_PI << ") degrees\n";
-  cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
-
-  return 0;
-}
 
 
 
@@ -290,7 +117,7 @@ void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
 }
 
 
-common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches)
+void linearSolutionHa(const Matrix3d& K, const vector<Match>& matches, common::Quaterniond& q)
 {
   // Unpack camera intrinsic parameters
   double fx = K(0,0);
@@ -314,6 +141,7 @@ common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>&
     if (abs(p1.x - u0) < 1.0 && abs(p1.y - v0) < 1.0) continue;
     if (abs(p2.x - u0) < 1.0 && abs(p2.y - v0) < 1.0) continue;
 
+    // Populate matrix/vector solution
     size_t idx1 = 2 * i;
     size_t idx2 = 2 * i + 1;
     A(idx1,0) = fx*u0*(p1.y - v0);
@@ -330,97 +158,61 @@ common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>&
   Vector3d r = A.householderQr().solve(b);
   
   // -r because the algorithm is based on a rotation matrix and quaternions are opposite rotations
-  return common::Quaterniond::exp(-r);
+  q = common::Quaterniond::exp(-r);
 }
 
 
-common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Match>& matches)
+common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches)
 {
-  static const int max_iters = 100;
-  static const double exit_tol = 1e-6;
-  static const double lambda_adjust = 10.0;
-  static const double restart_variation = 3*M_PI/180;
-  static const double lambda0 = 1.0;
-
-  // Compute constants
-  Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
-  matrixMconstants(K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
-
-  // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
   common::Quaterniond q;
-  kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
-          K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
-
-  return q; 
+  linearSolutionHa(K, matches, q);
+  return q;
 }
 
 
-common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vector<Match>& matches)
+common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<Match>& matches)
 {
-  static const int max_iters = 100;
-  static const double exit_tol = 1e-6;
-  static const double lambda_adjust = 10.0;
-  static const double restart_variation = 1*M_PI/180;
-  static const double lambda0 = 1.0;
+  static const int RANSAC_iters = 24;
+  static const double RANSAC_thresh = 40.0;
+  static const double RANSAC_min_inlier_ratio = 0.8;
 
-  static const int RANSAC_iters = 16;
-  static const double RANSAC_thresh = 1e-7;
-  static const double RANSAC_min_inlier_ratio = 0.7; // if this is greater than the real thing, why do I get bad answers?
-
-  common::Quaterniond q;
   Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
-  vector<Match> inliers, inliers_final, inliers_test, matches_shuffled;
+  vector<Match> inliers, inliers_final, matches_shuffled;
+  static const Matrix3d K_inv = K.inverse();
   for (int ii = 0; ii < RANSAC_iters; ++ii)
   {
     // Randomly select two point pairs
     inliers.clear();
     matches_shuffled = matches;
     std::random_shuffle(matches_shuffled.begin(), matches_shuffled.end());
-    inliers.push_back(matches_shuffled.back());
-    matches_shuffled.pop_back();
-    inliers.push_back(matches_shuffled.back());
-    matches_shuffled.pop_back();
+    for (int jj = 0; jj < 2; ++jj)
+    {
+      inliers.push_back(matches_shuffled.back());
+      matches_shuffled.pop_back();
+    }
 
-    // Compute constants
-    matrixMconstants(K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
-
-    // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
-    kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
-            K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
-    
-    // Translation direction
-    Vector3d p11 = inliers[0].p1.vec3().normalized();
-    Vector3d p12 = inliers[0].p2.vec3().normalized();
-    Vector3d p21 = inliers[1].p1.vec3().normalized();
-    Vector3d p22 = inliers[1].p2.vec3().normalized();
-    Vector3d n1 = p11.cross(q.inv().rot(p12));
-    Vector3d n2 = p21.cross(q.inv().rot(p22));
-    Vector3d t = (n1.cross(n2)).normalized();
+    // Compute solution based on two points
+    common::Quaterniond q;
+    linearSolutionHa(K, inliers, q);
 
     // Iterate through remaining point pairs
-    inliers_test = inliers;
     while (matches_shuffled.size() > 0)
     {
-      // Add third point to inlier set
-      inliers_test.push_back(matches_shuffled.back());
-      matches_shuffled.pop_back();
+      // Unpack points for readability
+      Point p1 = matches_shuffled.back().p1;
+      Point p2 = matches_shuffled.back().p2;
 
-      // Recompute constants and check derivative
-      matrixMconstants(K, inliers_test, Ax, Ay, Az, Axy, Axz, Ayz);
-      Vector3d dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
-      double lam_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
-      if (lam_min < RANSAC_thresh)
-      // if (inliers_test.back().p1.id < 999999)
+      // Check eprojection error
+      Vector2d pixel_diff = (p2.vec3() - K*q.rot(K_inv*p1.vec3())).topRows<2>();
+      if (pixel_diff.norm() < RANSAC_thresh)
       {
-        cout << endl;
-        cout << "dl_dq.norm(): " << dl_dq.norm() << endl;
-        cout << "  lambda_min: " << lam_min << endl;
-        cout << "          ID: " << inliers_test.back().p1.id << endl;
-        inliers.push_back(inliers_test.back());
+        // cout << endl;
+        // cout << "pixel_diff.norm(): " << pixel_diff.norm() << ", ID: " << matches_shuffled.back().p1.id << endl;
+        inliers.push_back(matches_shuffled.back());
       }
 
-      // Remove the third point
-      inliers_test.pop_back();
+      // Remove point from set
+      matches_shuffled.pop_back();
     }
 
     // Keep track of set with the most inliers
@@ -433,12 +225,11 @@ common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vecto
   }
 
   // Smooth final solution over all inliers
-  matrixMconstants(K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
-  kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
-          K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
-  cout << "\nFINAL INLIER RATIO: " << double(inliers_final.size())/matches.size() << endl;
+  common::Quaterniond q;
+  if (inliers_final.size() > 1)
+    linearSolutionHa(K, inliers_final, q);
 
-  return q; 
+  return q;
 }
 
 
@@ -464,61 +255,6 @@ void matrixMconstants(const Matrix3d& K, const vector<Match>& matches,
     Axy += a(0)*a(1)*bbT;
     Axz += a(0)*a(2)*bbT;
     Ayz += a(1)*a(2)*bbT;
-  }
-}
-
-
-void kneipLM(common::Quaterniond& q, 
-             const int& max_iters, const double& exit_tol, const double& lambda0,
-             const double& lambda_adjust, const double& restart_variation,
-             const Matrix3d& K, const vector<Match>& matches,
-             const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
-             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
-{
-  common::Quaterniond q0 = rotationFromPointsHa(K, matches);
-  double lambda = lambda0;
-  q = q0;
-
-  // Find R(v) to minimize smallest eigenvalue of M
-  common::Quaterniond q_new;
-  Vector3d dl_dq, dl_dq_new, b, delta;
-  Matrix3d J, H, A;
-  bool prev_fail = false;
-  for (int i = 0; i < max_iters; ++i)
-  {
-    // Calculate change in Cayley parameters
-    if (!prev_fail)
-    {
-      dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
-      J = secondDerivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
-      H = J.transpose()*J;
-      b = -J.transpose()*dl_dq;
-    }
-    // A = H + lambda*Matrix3d(H.diagonal().asDiagonal());
-    A = H + lambda*Matrix3d::Identity();
-    delta = A.householderQr().solve(b);
-
-    // Compute error with new parameters
-    q_new = q + delta;
-    dl_dq_new = derivativeOfMinEigenvalueOfM(q_new, Ax, Ay, Az, Axy, Axz, Ayz);
-    if (dl_dq_new.norm() < dl_dq.norm())
-    {
-      q = q_new;
-      lambda /= lambda_adjust;
-      prev_fail = false;
-    }
-    else
-    {
-      lambda *= lambda_adjust;
-      prev_fail = true;
-    }
-
-    if (delta.norm() < exit_tol) break;
-
-    // Try restarting at random value if rotation > some threshold
-    double rot_from_q0 = common::Quaterniond::log(q.inv() * q0).norm();
-    if (rot_from_q0 > restart_variation)
-      q = q0 + restart_variation * Vector3d::Random();
   }
 }
 
@@ -616,7 +352,7 @@ Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
   return (-1.0/3.0*(db_dv + dDelta0_dv/C + (1.0 - Delta0/(C*C))*dC_dv)).real();
 }
 
-// TODO: Try complex step derivative
+
 Matrix3d secondDerivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                             const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
@@ -632,4 +368,313 @@ Matrix3d secondDerivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
     ddl_ddq.col(i) = (dlam_p - dlam_m)/(2.0*eps);
   }
   return ddl_ddq;
+}
+
+
+void kneipLM(common::Quaterniond& q, 
+             const int& max_iters, const double& exit_tol, const double& lambda0,
+             const double& lambda_adjust, const double& restart_variation,
+             const Matrix3d& K, const vector<Match>& matches,
+             const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
+             const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
+{
+  common::Quaterniond q0;// = rotationFromPointsHa(K, matches);
+  double lambda = lambda0;
+  q = q0;
+
+  // Find R(v) to minimize smallest eigenvalue of M
+  common::Quaterniond q_new;
+  Vector3d dl_dq, dl_dq_new, b, delta;
+  Matrix3d J, H, A;
+  bool prev_fail = false;
+  for (int i = 0; i < max_iters; ++i)
+  {
+    // Calculate change in Cayley parameters
+    if (!prev_fail)
+    {
+      dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      J = secondDerivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      H = J.transpose()*J;
+      b = -J.transpose()*dl_dq;
+    }
+    // A = H + lambda*Matrix3d(H.diagonal().asDiagonal());
+    A = H + lambda*Matrix3d::Identity();
+    delta = A.householderQr().solve(b);
+
+    // Compute error with new parameters
+    q_new = q + delta;
+    dl_dq_new = derivativeOfMinEigenvalueOfM(q_new, Ax, Ay, Az, Axy, Axz, Ayz);
+    if (dl_dq_new.norm() < dl_dq.norm())
+    {
+      q = q_new;
+      lambda /= lambda_adjust;
+      prev_fail = false;
+    }
+    else
+    {
+      lambda *= lambda_adjust;
+      prev_fail = true;
+    }
+
+    if (delta.norm() < exit_tol) break;
+
+    // Try restarting at random value if rotation > some threshold
+    double rot_from_q0 = common::Quaterniond::log(q.inv() * q0).norm();
+    if (rot_from_q0 > restart_variation)
+      q = q0 + restart_variation * Vector3d::Random();
+  }
+}
+
+
+common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Match>& matches)
+{
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double restart_variation = 3*M_PI/180;
+  static const double lambda0 = 1.0;
+
+  // Compute constants
+  Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
+  matrixMconstants(K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
+
+  // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
+  common::Quaterniond q;
+  kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
+          K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
+
+  return q; 
+}
+
+
+common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vector<Match>& matches)
+{
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double restart_variation = 1*M_PI/180;
+  static const double lambda0 = 1.0;
+
+  static const int RANSAC_iters = 16;
+  static const double RANSAC_thresh = 1e-7;
+  static const double RANSAC_min_inlier_ratio = 0.7; // if this is greater than the real thing, why do I get bad answers?
+
+  common::Quaterniond q;
+  Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
+  vector<Match> inliers, inliers_final, inliers_test, matches_shuffled;
+  for (int ii = 0; ii < RANSAC_iters; ++ii)
+  {
+    // Randomly select two point pairs
+    inliers.clear();
+    matches_shuffled = matches;
+    std::random_shuffle(matches_shuffled.begin(), matches_shuffled.end());
+    inliers.push_back(matches_shuffled.back());
+    matches_shuffled.pop_back();
+    inliers.push_back(matches_shuffled.back());
+    matches_shuffled.pop_back();
+
+    // Compute constants
+    matrixMconstants(K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
+
+    // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
+    kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
+            K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
+
+    // Iterate through remaining point pairs
+    inliers_test = inliers;
+    while (matches_shuffled.size() > 0)
+    {
+      // Add third point to inlier set
+      inliers_test.push_back(matches_shuffled.back());
+      matches_shuffled.pop_back();
+
+      // Recompute constants and check derivative
+      matrixMconstants(K, inliers_test, Ax, Ay, Az, Axy, Axz, Ayz);
+      Vector3d dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      double lam_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      if (lam_min < RANSAC_thresh)
+      // if (inliers_test.back().p1.id < 999999)
+      {
+        cout << endl;
+        cout << "dl_dq.norm(): " << dl_dq.norm() << endl;
+        cout << "  lambda_min: " << lam_min << endl;
+        cout << "          ID: " << inliers_test.back().p1.id << endl;
+        inliers.push_back(inliers_test.back());
+      }
+
+      // Remove the third point
+      inliers_test.pop_back();
+    }
+
+    // Keep track of set with the most inliers
+    if (inliers_final.size() < inliers.size())
+      inliers_final = inliers;
+
+    // End if minimum inlier threshold is met
+    if (double(inliers.size())/matches.size() > RANSAC_min_inlier_ratio)
+      break;
+  }
+
+  // Smooth final solution over all inliers
+  matrixMconstants(K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
+  kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
+          K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
+  cout << "\nFINAL INLIER RATIO: " << double(inliers_final.size())/matches.size() << endl;
+
+  return q;
+}
+
+
+
+
+/*================================= MAIN =================================*/
+
+int main(int argc, char* argv[])
+{
+  // Random parameters
+  auto t0 = high_resolution_clock::now();
+  size_t seed = 0;//time(0);
+  default_random_engine rng(seed);
+  uniform_real_distribution<double> dist(-1.0, 1.0);
+  srand(seed);
+
+  // Camera parameters
+  double cx = 320;
+  double cy = 240;
+  double half_fov_x = 3.0*M_PI/180.0;
+  double half_fov_y = cy/cx*half_fov_x;
+  double fx = cx/tan(half_fov_x);
+  double fy = cy/tan(half_fov_y);
+  Matrix3d K = Matrix3d::Identity();
+  K(0,0) = fx;
+  K(1,1) = fy;
+  K(0,2) = cx;
+  K(1,2) = cy;
+
+
+  // solver:
+  // - 0: Ha solver
+  // - 1: Ha solver w/ RANSAC
+  // - 2: Kneip solver
+  // - 3: Kneip solver w/ RANSAC
+  int solver = 1;
+
+  double zI_offset = 1000;
+  const unsigned N = 31; // number of points along single grid line
+  const double pix_noise_bound = 1.0; // pixels
+  const double trans_err = 5.0;
+  const double rot_err = 5.0;
+  const double matched_pts_inlier_ratio = 0.8;
+  const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
+
+  size_t num_iters = 1000;
+  size_t num_bad_iters = 0;
+  double error_tol = 2.0*M_PI/180;
+
+
+  double dt_calc_mean = 0.0; // seconds
+  double dt_calc_var = 0.0; // seconds
+  double error_mean = 0.0;
+  double error_var = 0.0;
+  double lambda_min_mean = 0.0;
+  double lambda_min_var = 0.0;
+  double match_pts_mean = 0.0;
+  double match_pts_var = 0.0;
+  size_t n_stats = 0;
+  for (size_t iter = 0; iter < num_iters; ++iter)
+  {
+    cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
+
+    // Camera poses
+    double p1_n = -zI_offset + trans_err*dist(rng);
+    double p1_e = trans_err*dist(rng);
+    double p1_d = trans_err*dist(rng);
+
+    double p1_r = rot_err*M_PI/180.0*dist(rng);
+    double p1_p = rot_err*M_PI/180.0*dist(rng);
+    double p1_y = rot_err*M_PI/180.0*dist(rng);
+
+    double p2_n = -zI_offset + trans_err*dist(rng);
+    double p2_e = trans_err*dist(rng);
+    double p2_d = trans_err*dist(rng);
+
+    double p2_r = rot_err*M_PI/180.0*dist(rng);
+    double p2_p = rot_err*M_PI/180.0*dist(rng);
+    double p2_y = rot_err*M_PI/180.0*dist(rng);
+
+    common::Transformd x1, x2;
+    x1.setP(Vector3d(p1_n, p1_e, p1_d));
+    x2.setP(Vector3d(p2_n, p2_e, p2_d));
+    x1.setQ(common::Quaterniond(p1_r, p1_p, p1_y));
+    x2.setQ(common::Quaterniond(p2_r, p2_p, p2_y));
+
+    // Planar points (NED)
+    // - N x N grid within +-bound in east and down directions
+    vector<Point> pts_I = createInertialPoints(N, bound);
+
+    // Project matching points into each camera image
+    vector<Match> matches;
+    projectAndMatchImagePoints(K, pts_I, x1, x2, pix_noise_bound, matched_pts_inlier_ratio, matches);
+    if (matches.size() < 8)
+    {
+      --iter; // Try that iteration again
+      continue;
+    }
+
+    common::Quaterniond q_hat;
+    auto t_calc_0 = high_resolution_clock::now();
+    if (solver == 0)
+      q_hat = rotationFromPointsHa(K, matches);
+    else if (solver == 1)
+      q_hat = rotationFromPointsHaRANSAC(K, matches);
+    else if (solver == 2)
+      q_hat = rotationFromPointsKneip(K, matches);
+    else if (solver == 3)
+      q_hat = rotationFromPointsKneipRANSAC(K, matches);
+    else
+      throw runtime_error("Select an existing solver!");
+    double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
+
+    // Compute true rotation and translation and rotation error
+    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
+    Vector3d t = x2.p() - x1.p();
+    double rot_error = common::Quaterniond::log(q.inv()*q_hat).norm();
+
+    // Show debug output if solution is not close enough to truth
+    if (rot_error > error_tol)
+    {
+      ++num_bad_iters;
+      cout << "\n\n";
+      cout << "           Calc time taken: " << dt_calc << " seconds\n";
+      cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
+      cout << "True translation magnitude: " << t.norm() << " meters\n";
+      cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
+      cout << "   Number of point matches: " << matches.size() << "\n";
+      cout << "                       q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
+      cout << "                     q_hat: " << q_hat.toEigen().transpose() << "\n";
+      cout << "                    q_true: " << q.toEigen().transpose() << "\n\n";
+      continue; // Bad solutions aren't useful in the following statistics
+    }
+
+    // Recursive error and variance of things
+    dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
+    error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
+    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
+    if (n_stats > 0)
+    {
+      dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
+      error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
+      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
+    }
+    ++n_stats;
+  }
+  auto tf = duration_cast<microseconds>(high_resolution_clock::now() - t0).count()*1e-6;
+  cout << "        Total time taken: " << tf << " seconds\n";
+  cout << "         Error tolerance: " << error_tol*180/M_PI << " degrees\n";
+  cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
+  cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
+  cout << "     Error (mean, stdev): (" << error_mean*180/M_PI << ", " << sqrt(error_var)*180/M_PI << ") degrees\n";
+  cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
+
+  return 0;
 }
