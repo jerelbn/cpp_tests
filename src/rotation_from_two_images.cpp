@@ -34,21 +34,34 @@ struct Point
   unsigned id;
 };
 
+struct Match
+{
+  Match(const Point& _p1, const Point& _p2)
+    : p1(_p1), p2(_p2) {}
+  
+  Point p1, p2;
+};
+
 vector<Point> createInertialPoints(const unsigned& N, const double& bound);
 void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
                                 const common::Transformd& x1, const common::Transformd& x2,
-                                vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound);
-common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
-common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2);
-void matrixMconstants(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+                                const double& pix_noise_bound, const double& matched_pts_inlier_ratio,
+                                vector<Match>& matches);
+common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches);
+common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Match>& matches);
+common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vector<Match>& matches);
+void matrixMconstants(const Matrix3d& K, const vector<Match>& matches,
                       Matrix3d& Ax,  Matrix3d& Ay,  Matrix3d& Az,
                       Matrix3d& Axy, Matrix3d& Axz, Matrix3d& Ayz);
 void kneipLM(common::Quaterniond& q, 
              const int& max_iters, const double& exit_tol, const double& lambda0,
              const double& lambda_adjust, const double& restart_variation,
-             const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+             const Matrix3d& K, const vector<Match>& matches,
              const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
              const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
+double minEigenvalueOfM(const common::Quaterniond& q,
+                        const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
+                        const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
 Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
                                       const Matrix3d& Ax, const Matrix3d& Ay, const Matrix3d& Az,
                                       const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz);
@@ -63,7 +76,7 @@ int main(int argc, char* argv[])
 {
   // Random parameters
   auto t0 = high_resolution_clock::now();
-  size_t seed = time(0);
+  size_t seed = 0;//time(0);
   default_random_engine rng(seed);
   uniform_real_distribution<double> dist(-1.0, 1.0);
   srand(seed);
@@ -85,18 +98,19 @@ int main(int argc, char* argv[])
   // - 0: Ha solver
   // - 1: Kneip solver
   // - 2: Kneip solver w/ RANSAC
-  int solver = 1;
+  int solver = 2;
 
   double zI_offset = 2000;
   const unsigned N = 31; // number of points along single grid line
-  const double pix_noise_bound = 1.0; // pixels
+  const double pix_noise_bound = 0.5; // pixels
   const double trans_err = 5.0;
   const double rot_err = 3.0;
+  const double matched_pts_inlier_ratio = 0.8;
   const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
 
-  size_t num_iters = 1000;
+  size_t num_iters = 1;
   size_t num_bad_iters = 0;
-  double error_tol = 5.0*M_PI/180;
+  double error_tol = 0.0*M_PI/180;
   double dt_calc_mean = 0.0; // seconds
   double dt_calc_var = 0.0; // seconds
   double error_mean = 0.0;
@@ -138,9 +152,9 @@ int main(int argc, char* argv[])
     vector<Point> pts_I = createInertialPoints(N, bound);
 
     // Project matching points into each camera image
-    vector<Point> matches_1, matches_2;
-    projectAndMatchImagePoints(K, pts_I, x1, x2, matches_1, matches_2, pix_noise_bound);
-    if (matches_1.size() < 2)
+    vector<Match> matches;
+    projectAndMatchImagePoints(K, pts_I, x1, x2, pix_noise_bound, matched_pts_inlier_ratio, matches);
+    if (matches.size() < 2)
     {
       --iter; // Try that iteration again
       continue;
@@ -149,9 +163,11 @@ int main(int argc, char* argv[])
     common::Quaterniond q_hat;
     auto t_calc_0 = high_resolution_clock::now();
     if (solver == 0)
-      q_hat = rotationFromPointsHa(K, matches_1, matches_2);
+      q_hat = rotationFromPointsHa(K, matches);
     else if (solver == 1)
-      q_hat = rotationFromPointsKneip(K, matches_1, matches_2);
+      q_hat = rotationFromPointsKneip(K, matches);
+    else if (solver == 2)
+      q_hat = rotationFromPointsKneipRANSAC(K, matches);
     else
       throw runtime_error("Select an existing solver!");
     double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
@@ -170,9 +186,9 @@ int main(int argc, char* argv[])
       cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
       cout << "True translation magnitude: " << t.norm() << " meters\n";
       cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
-      cout << "   Number of point matches: " << matches_1.size() << "\n";
-      cout << "                       q_0:  " << rotationFromPointsHa(K, matches_1, matches_2).toEigen().transpose() << "\n";
-      cout << "                     q_hat:  " << q_hat.toEigen().transpose() << "\n";
+      cout << "   Number of point matches: " << matches.size() << "\n";
+      cout << "                       q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
+      cout << "                     q_hat: " << q_hat.toEigen().transpose() << "\n";
       cout << "                    q_true: " << q.toEigen().transpose() << "\n\n";
       continue; // Bad solutions aren't useful in the following statistics
     }
@@ -180,87 +196,14 @@ int main(int argc, char* argv[])
     // Recursive error and variance of things
     dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
     error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
-    match_pts_mean = (n_stats*match_pts_mean + matches_1.size())/(n_stats+1);
+    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
     if (n_stats > 0)
     {
       dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
       error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
-      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches_1.size() - match_pts_mean, 2.0))/n_stats;
+      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
     }
     ++n_stats;
-
-    /*==============================================================================================*/
-
-        // // Looking at eigenvalues of M and M_hat
-    // unsigned N = 2 * matches_1.size();
-    // Matrix3d K_inv = K.inverse();
-    // Matrix3d M = Matrix3d::Zero();
-    // Matrix3d M_hat = Matrix3d::Zero();
-    // for (int i = 0; i < matches_1.size(); ++i)
-    // {
-    //   Vector3d a = (K_inv*matches_1[i].vec3()).normalized();
-    //   Vector3d b = (K_inv*matches_2[i].vec3()).normalized();
-    //   Vector3d n = a.cross(q.inv().rot(b));
-    //   Vector3d n_hat = a.cross(q_hat.inv().rot(b));
-    //   M += n*n.transpose();
-    //   M_hat += n_hat*n_hat.transpose();
-    // }
-    // cout << "\n\n";
-    // cout << "  Eigenvalues of M:     " << M.eigenvalues().real().transpose() << endl;
-    // cout << "  Eigenvalues of M_hat: " << M_hat.eigenvalues().real().transpose() << "\n\n";
-
-
-
-    // // Looking at eigenvalues of M and M_hat
-    // common::Quaterniond q0 = rotationFromPointsHa(K, matches_1, matches_2);
-    // unsigned N = 2 * matches_1.size();
-    // Matrix3d K_inv = K.inverse();
-    // Matrix3d M = Matrix3d::Zero();
-    // Vector3d a0 = (K_inv*matches_1[0].vec3()).normalized();
-    // Vector3d b0 = (K_inv*matches_2[0].vec3()).normalized();
-    // Vector3d a1 = (K_inv*matches_1[1].vec3()).normalized();
-    // Vector3d b1 = (K_inv*matches_2[1].vec3()).normalized();
-    // Vector3d n0 = a0.cross(q.inv().rot(b0));
-    // Vector3d n1 = a1.cross(q.inv().rot(b1));
-    // M += n0*n0.transpose();
-    // M += n1*n1.transpose();
-    // cout << "\n\n";
-    // cout << "                q0: " << q0.toEigen().transpose() << endl;
-    // cout << "             q_hat: " << q_hat.toEigen().transpose() << endl;
-    // cout << "                 q: " << q.toEigen().transpose() << endl;
-    // cout << "  Eigenvalues of M: " << M.eigenvalues().real().transpose() << "\n\n";
-
-
-    // common::Quaterniond q0 = rotationFromPointsHa(K, matches_1, matches_2);
-    // unsigned N = 2 * matches_1.size();
-    // Matrix3d K_inv = K.inverse();
-    // Matrix3d Ax = Matrix3d::Zero();
-    // Matrix3d Ay = Matrix3d::Zero();
-    // Matrix3d Az = Matrix3d::Zero();
-    // Matrix3d Axy = Matrix3d::Zero();
-    // Matrix3d Axz = Matrix3d::Zero();
-    // Matrix3d Ayz = Matrix3d::Zero();
-    // for (size_t i = 0; i < matches_1.size(); ++i)
-    // {
-    //   Vector3d a = (K_inv*matches_1[i].vec3()).normalized();
-    //   Vector3d b = (K_inv*matches_2[i].vec3()).normalized();
-    //   Matrix3d bbT = b*b.transpose();
-    //   Ax += a(0)*a(0)*bbT;
-    //   Ay += a(1)*a(1)*bbT;
-    //   Az += a(2)*a(2)*bbT;
-    //   Axy += a(0)*a(1)*bbT;
-    //   Axz += a(0)*a(2)*bbT;
-    //   Ayz += a(1)*a(2)*bbT;
-    // }
-    // cout << "\n\n";
-    // cout << "     Derivative q0: " << derivativeOfMinEigenvalueOfM(q0, Ax, Ay, Az, Axy, Axz, Ayz).transpose() << endl;
-    // cout << "  Derivative q_hat: " << derivativeOfMinEigenvalueOfM(q_hat, Ax, Ay, Az, Axy, Axz, Ayz).transpose() << endl;
-    // cout << "      Derivative q: " << derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz).transpose() << endl;
-    // cout << endl;
-
-
-
-    /*==============================================================================================*/
   }
   auto tf = duration_cast<microseconds>(high_resolution_clock::now() - t0).count()*1e-6;
   cout << "        Total time taken: " << tf << " seconds\n";
@@ -304,10 +247,10 @@ vector<Point> createInertialPoints(const unsigned& N, const double& bound)
 
 void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
                                 const common::Transformd& x1, const common::Transformd& x2,
-                                vector<Point>& pts1, vector<Point>& pts2, const double& pix_noise_bound)
+                                const double& pix_noise_bound, const double& matched_pts_inlier_ratio,
+                                vector<Match>& matches)
 {
-  pts1.clear();
-  pts2.clear();
+  matches.clear();
   double image_size_x = 2*K(0,2);
   double image_size_y = 2*K(1,2);
   for (const Point& pt_I : pts_I)
@@ -327,14 +270,27 @@ void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
     if (pt_img1(0) >= 0 && pt_img1(1) >= 0 && pt_img1(0) <= image_size_x && pt_img1(1) <= image_size_y &&
         pt_img2(0) >= 0 && pt_img2(1) >= 0 && pt_img2(0) <= image_size_x && pt_img2(1) <= image_size_y)
     {
-      pts1.push_back(Point(pt_img1(0), pt_img1(1), 1, pt_I.id));
-      pts2.push_back(Point(pt_img2(0), pt_img2(1), 1, pt_I.id));
+      matches.push_back(Match(Point(pt_img1(0), pt_img1(1), 1, pt_I.id),
+                              Point(pt_img2(0), pt_img2(1), 1, pt_I.id)));
     }
+  }
+
+  // Add outliers to matched points
+  double num_inliers = matches.size();
+  while (num_inliers/matches.size() > matched_pts_inlier_ratio)
+  {
+    Vector2d pt_img1, pt_img2;
+    pt_img1(0) = image_size_x*double(rand())/RAND_MAX;
+    pt_img1(1) = image_size_y*double(rand())/RAND_MAX;
+    pt_img2(0) = image_size_x*double(rand())/RAND_MAX;
+    pt_img2(1) = image_size_y*double(rand())/RAND_MAX;
+    matches.push_back(Match(Point(pt_img1(0), pt_img1(1), 1, 999999999),
+                            Point(pt_img2(0), pt_img2(1), 1, 999999999)));
   }
 }
 
 
-common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
+common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches)
 {
   // Unpack camera intrinsic parameters
   double fx = K(0,0);
@@ -343,16 +299,16 @@ common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>&
   double v0 = K(1,2);
 
   // Build linear system with point matches
-  unsigned N = 2 * matches_1.size();
+  unsigned N = 2 * matches.size();
   MatrixXd A(N,3);
   MatrixXd b(N,1);
   A.setZero();
   b.setZero();
-  for (size_t i = 0; i < matches_1.size(); ++i)
+  for (size_t i = 0; i < matches.size(); ++i)
   {
     // Unpack points for readability
-    Point p1 = matches_1[i];
-    Point p2 = matches_2[i];
+    Point p1 = matches[i].p1;
+    Point p2 = matches[i].p2;
 
     // Make sure points are not aligned with camera axis
     if (abs(p1.x - u0) < 1.0 && abs(p1.y - v0) < 1.0) continue;
@@ -378,28 +334,115 @@ common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Point>&
 }
 
 
-common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2)
+common::Quaterniond rotationFromPointsKneip(const Matrix3d& K, const vector<Match>& matches)
 {
   static const int max_iters = 100;
   static const double exit_tol = 1e-6;
   static const double lambda_adjust = 10.0;
   static const double restart_variation = 3*M_PI/180;
-  static double lambda0 = 1.0; // Damping factor
+  static const double lambda0 = 1.0;
 
   // Compute constants
   Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
-  matrixMconstants(K, matches_1, matches_2, Ax, Ay, Az, Axy, Axz, Ayz);
+  matrixMconstants(K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
 
   // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
   common::Quaterniond q;
   kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
-          K, matches_1, matches_2, Ax, Ay, Az, Axy, Axz, Ayz);
+          K, matches, Ax, Ay, Az, Axy, Axz, Ayz);
 
   return q; 
 }
 
 
-void matrixMconstants(const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vector<Match>& matches)
+{
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double restart_variation = 1*M_PI/180;
+  static const double lambda0 = 1.0;
+
+  static const int RANSAC_iters = 16;
+  static const double RANSAC_thresh = 1e-7;
+  static const double RANSAC_min_inlier_ratio = 0.7; // if this is greater than the real thing, why do I get bad answers?
+
+  common::Quaterniond q;
+  Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
+  vector<Match> inliers, inliers_final, inliers_test, matches_shuffled;
+  for (int ii = 0; ii < RANSAC_iters; ++ii)
+  {
+    // Randomly select two point pairs
+    inliers.clear();
+    matches_shuffled = matches;
+    std::random_shuffle(matches_shuffled.begin(), matches_shuffled.end());
+    inliers.push_back(matches_shuffled.back());
+    matches_shuffled.pop_back();
+    inliers.push_back(matches_shuffled.back());
+    matches_shuffled.pop_back();
+
+    // Compute constants
+    matrixMconstants(K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
+
+    // Find R(q) to minimize smallest eigenvalue of M via Levenberg-Marquardt algorithm
+    kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
+            K, inliers, Ax, Ay, Az, Axy, Axz, Ayz);
+    
+    // Translation direction
+    Vector3d p11 = inliers[0].p1.vec3().normalized();
+    Vector3d p12 = inliers[0].p2.vec3().normalized();
+    Vector3d p21 = inliers[1].p1.vec3().normalized();
+    Vector3d p22 = inliers[1].p2.vec3().normalized();
+    Vector3d n1 = p11.cross(q.inv().rot(p12));
+    Vector3d n2 = p21.cross(q.inv().rot(p22));
+    Vector3d t = (n1.cross(n2)).normalized();
+
+    // Iterate through remaining point pairs
+    inliers_test = inliers;
+    while (matches_shuffled.size() > 0)
+    {
+      // Add third point to inlier set
+      inliers_test.push_back(matches_shuffled.back());
+      matches_shuffled.pop_back();
+
+      // Recompute constants and check derivative
+      matrixMconstants(K, inliers_test, Ax, Ay, Az, Axy, Axz, Ayz);
+      Vector3d dl_dq = derivativeOfMinEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      double lam_min = minEigenvalueOfM(q, Ax, Ay, Az, Axy, Axz, Ayz);
+      if (lam_min < RANSAC_thresh)
+      // if (inliers_test.back().p1.id < 999999)
+      {
+        cout << endl;
+        cout << "dl_dq.norm(): " << dl_dq.norm() << endl;
+        cout << "  lambda_min: " << lam_min << endl;
+        cout << "          ID: " << inliers_test.back().p1.id << endl;
+        inliers.push_back(inliers_test.back());
+      }
+
+      // Remove the third point
+      inliers_test.pop_back();
+    }
+
+    // Keep track of set with the most inliers
+    if (inliers_final.size() < inliers.size())
+      inliers_final = inliers;
+
+    // End if minimum inlier threshold is met
+    if (double(inliers.size())/matches.size() > RANSAC_min_inlier_ratio)
+      break;
+  }
+
+  // Smooth final solution over all inliers
+  matrixMconstants(K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
+  kneipLM(q, max_iters, exit_tol, lambda0, lambda_adjust, restart_variation,
+          K, inliers_final, Ax, Ay, Az, Axy, Axz, Ayz);
+  cout << "\nFINAL INLIER RATIO: " << double(inliers_final.size())/matches.size() << endl;
+
+  return q; 
+}
+
+
+void matrixMconstants(const Matrix3d& K, const vector<Match>& matches,
                       Matrix3d& Ax,  Matrix3d& Ay,  Matrix3d& Az,
                       Matrix3d& Axy, Matrix3d& Axz, Matrix3d& Ayz)
 {
@@ -410,10 +453,10 @@ void matrixMconstants(const Matrix3d& K, const vector<Point>& matches_1, const v
   Axz.setZero();
   Ayz.setZero();
   Matrix3d K_inv = K.inverse();
-  for (size_t i = 0; i < matches_1.size(); ++i)
+  for (size_t i = 0; i < matches.size(); ++i)
   {
-    Vector3d a = (K_inv*matches_1[i].vec3()).normalized();
-    Vector3d b = (K_inv*matches_2[i].vec3()).normalized();
+    Vector3d a = (K_inv*matches[i].p1.vec3()).normalized();
+    Vector3d b = (K_inv*matches[i].p2.vec3()).normalized();
     Matrix3d bbT = b*b.transpose();
     Ax += a(0)*a(0)*bbT;
     Ay += a(1)*a(1)*bbT;
@@ -428,11 +471,11 @@ void matrixMconstants(const Matrix3d& K, const vector<Point>& matches_1, const v
 void kneipLM(common::Quaterniond& q, 
              const int& max_iters, const double& exit_tol, const double& lambda0,
              const double& lambda_adjust, const double& restart_variation,
-             const Matrix3d& K, const vector<Point>& matches_1, const vector<Point>& matches_2,
+             const Matrix3d& K, const vector<Match>& matches,
              const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
              const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
 {
-  common::Quaterniond q0 = rotationFromPointsHa(K, matches_1, matches_2);
+  common::Quaterniond q0 = rotationFromPointsHa(K, matches);
   double lambda = lambda0;
   q = q0;
 
@@ -477,6 +520,41 @@ void kneipLM(common::Quaterniond& q,
     if (rot_from_q0 > restart_variation)
       q = q0 + restart_variation * Vector3d::Random();
   }
+}
+
+
+double minEigenvalueOfM(const common::Quaterniond& q,
+                        const Matrix3d& Ax,  const Matrix3d& Ay,  const Matrix3d& Az,
+                        const Matrix3d& Axy, const Matrix3d& Axz, const Matrix3d& Ayz)
+{
+  // Initial guess of rotation matrix from Cayley parameters
+  Matrix3d R = q.R();
+  Vector3d r1 = R.row(0);
+  Vector3d r2 = R.row(1);
+  Vector3d r3 = R.row(2);
+
+  // Compute components of matrix M
+  double m11 = r2.dot(Az*r2) + r3.dot(Ay*r3) - 2.0*r3.dot(Ayz*r2);
+  double m22 = r1.dot(Az*r1) + r3.dot(Ax*r3) - 2.0*r1.dot(Axz*r3);
+  double m33 = r1.dot(Ay*r1) + r2.dot(Ax*r2) - 2.0*r1.dot(Axy*r2);
+  double m12 = r1.dot(Ayz*r3) - r3.dot(Axy*r3) - r1.dot(Az*r2) + r3.dot(Axz*r2);
+  double m13 = r2.dot(Axy*r3) - r2.dot(Axz*r2) - r1.dot(Ay*r3) + r1.dot(Ayz*r2);
+  double m23 = r1.dot(Axz*r2) - r1.dot(Ayz*r1) - r3.dot(Ax*r2) + r3.dot(Axy*r1);
+
+  double a = 1.0;
+  double b = -(m11 + m22 + m33);
+  double c = m11*m22 + m11*m33 + m22*m33 - m12*m12 - m13*m13 - m23*m23;
+  double d = m11*m23*m23 + m22*m13*m13 + m33*m12*m12 - 2.0*m12*m13*m23 - m11*m22*m33;
+
+  complex<double> Delta0 = b*b - 3.0*a*c;
+  complex<double> Delta1 = 2.0*b*b*b - 9.0*a*b*c + 27.0*a*a*d;
+
+  complex<double> root2 = sqrt(pow(Delta1,2.0) - 4.0*pow(Delta0,3.0));
+  complex<double> C = pow((Delta1 + root2)/2.0, 1.0/3.0);
+  if (abs(C.real()) < 1e-6)
+    C = pow((Delta1 - root2)/2.0, 1.0/3.0);
+
+  return (-1.0/3.0*(b + C + Delta0/C)).real();
 }
 
 
