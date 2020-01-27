@@ -162,19 +162,96 @@ void linearSolutionHa(const Matrix3d& K, const vector<Match>& matches, common::Q
 }
 
 
+void refineHaLM(common::Quaterniond& q, 
+                const int& max_iters, const double& exit_tol,
+                const double& lambda0, const double& lambda_adjust,
+                const Matrix3d& K, const vector<Match>& matches)
+{
+  double lambda = lambda0;
+  Matrix3d K_inv = K.inverse();
+
+  // Find R(v) to minimize smallest eigenvalue of M
+  common::Quaterniond q_new;
+  Vector3d b, delta;
+  Matrix3d H, A;
+  unsigned N = matches.size();
+  VectorXd cost(N), cost_new(N);
+  MatrixXd J(N,3);
+  bool prev_fail = false;
+  for (int i = 0; i < max_iters; ++i)
+  {
+    // Calculate change in Cayley parameters
+    if (!prev_fail)
+    {
+      // Build cost function and Jacobian
+      for (int j = 0; j < N; ++j)
+      {
+        Vector3d nua = matches[j].p1.vec3();
+        Vector3d nub = matches[j].p2.vec3();
+        Vector3d nub_hat = K*q.rot(K_inv*nua);
+        Vector3d err = nub - nub_hat/nub_hat(2);
+        cost(j) = 0.5*err.dot(err);
+
+        Matrix3d dnub_hat_dq = -K*common::skew(q.rot(K_inv*nua));
+        J.row(j) = err.transpose()*((Matrix3d::Identity() - nub_hat*common::e3.transpose()/nub_hat(2))/nub_hat(2)*dnub_hat_dq);
+      }
+      H = J.transpose()*J;
+      b = -J.transpose()*cost;
+    }
+    Matrix3d H_diag = H.diagonal().asDiagonal();
+    A = H + lambda*H_diag;
+    delta = A.householderQr().solve(b);
+
+    // Compute cost with new parameters
+    q_new = q + delta;
+    for (int j = 0; j < N; ++j)
+    {
+      Vector3d nua = matches[j].p1.vec3();
+      Vector3d nub = matches[j].p2.vec3();
+      Vector3d nub_hat = K*q_new.rot(K_inv*nua);
+      Vector3d err = nub - nub_hat/common::e3.dot(nub_hat);
+      cost_new(j) = 0.5*err.dot(err);
+    }
+    if (cost_new.dot(cost_new) < cost.dot(cost))
+    {
+      q = q_new;
+      lambda /= lambda_adjust;
+      prev_fail = false;
+    }
+    else
+    {
+      lambda *= lambda_adjust;
+      prev_fail = true;
+    }
+
+    if (delta.norm() < exit_tol) break;
+  }
+}
+
+
 common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>& matches)
 {
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double lambda0 = 1.0;
+
   common::Quaterniond q;
   linearSolutionHa(K, matches, q);
+  refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
   return q;
 }
 
 
 common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<Match>& matches)
 {
-  static const int RANSAC_iters = 24;
-  static const double RANSAC_thresh = 40.0;
-  static const double RANSAC_min_inlier_ratio = 0.8;
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double lambda0 = 1.0;
+
+  static const int RANSAC_iters = 16;
+  static const double RANSAC_thresh = 10.0;
 
   Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
   vector<Match> inliers, inliers_final, matches_shuffled;
@@ -194,6 +271,7 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
     // Compute solution based on two points
     common::Quaterniond q;
     linearSolutionHa(K, inliers, q);
+    // refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers);
 
     // Iterate through remaining point pairs
     while (matches_shuffled.size() > 0)
@@ -218,16 +296,15 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
     // Keep track of set with the most inliers
     if (inliers_final.size() < inliers.size())
       inliers_final = inliers;
-
-    // End if minimum inlier threshold is met
-    if (double(inliers.size())/matches.size() > RANSAC_min_inlier_ratio)
-      break;
   }
 
   // Smooth final solution over all inliers
   common::Quaterniond q;
   if (inliers_final.size() > 1)
+  {
     linearSolutionHa(K, inliers_final, q);
+    // refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers_final);
+  }
 
   return q;
 }
@@ -564,12 +641,12 @@ int main(int argc, char* argv[])
   const double pix_noise_bound = 1.0; // pixels
   const double trans_err = 5.0;
   const double rot_err = 5.0;
-  const double matched_pts_inlier_ratio = 0.8;
+  const double matched_pts_inlier_ratio = 1.0;
   const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
 
   size_t num_iters = 1000;
   size_t num_bad_iters = 0;
-  double error_tol = 2.0*M_PI/180;
+  double error_tol = 5.0*M_PI/180;
 
 
   double dt_calc_mean = 0.0; // seconds
@@ -644,12 +721,20 @@ int main(int argc, char* argv[])
     if (rot_error > error_tol)
     {
       ++num_bad_iters;
+      Vector3d p1 = matches[0].p1.vec3();
+      Vector3d p2 = matches[0].p2.vec3();
+      Vector3d p12 = K*q.rot(K.inverse()*p1)/common::e3.dot(K*q.rot(K.inverse()*p1));
+      Vector3d p12hat = K*q_hat.rot(K.inverse()*p1)/common::e3.dot(K*q_hat.rot(K.inverse()*p1));
       cout << "\n\n";
       cout << "           Calc time taken: " << dt_calc << " seconds\n";
       cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
       cout << "True translation magnitude: " << t.norm() << " meters\n";
       cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
       cout << "   Number of point matches: " << matches.size() << "\n";
+      cout << "                        p1: " << p1.transpose() << "\n";
+      cout << "                        p2: " << p2.transpose() << "\n";
+      cout << "                      p 12: " << p12.transpose() << "\n";
+      cout << "                    p12hat: " << p12hat.transpose() << "\n";
       cout << "                       q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
       cout << "                     q_hat: " << q_hat.toEigen().transpose() << "\n";
       cout << "                    q_true: " << q.toEigen().transpose() << "\n\n";
