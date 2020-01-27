@@ -236,9 +236,12 @@ common::Quaterniond rotationFromPointsHa(const Matrix3d& K, const vector<Match>&
   static const double lambda_adjust = 10.0;
   static const double lambda0 = 1.0;
 
+  static const bool refine_solution = true;
+
   common::Quaterniond q;
   linearSolutionHa(K, matches, q);
-  refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
+  if (refine_solution)
+    refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
   return q;
 }
 
@@ -252,6 +255,8 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
 
   static const int RANSAC_iters = 16;
   static const double RANSAC_thresh = 10.0;
+
+  static const bool refine_solution = true;
 
   Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
   vector<Match> inliers, inliers_final, matches_shuffled;
@@ -271,7 +276,8 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
     // Compute solution based on two points
     common::Quaterniond q;
     linearSolutionHa(K, inliers, q);
-    // refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers);
+    if (refine_solution)
+      refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers);
 
     // Iterate through remaining point pairs
     while (matches_shuffled.size() > 0)
@@ -303,7 +309,8 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
   if (inliers_final.size() > 1)
   {
     linearSolutionHa(K, inliers_final, q);
-    // refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers_final);
+    if (refine_solution)
+      refineHaLM(q, max_iters, exit_tol, lambda0, lambda_adjust, K, inliers_final);
   }
 
   return q;
@@ -641,7 +648,7 @@ int main(int argc, char* argv[])
   const double pix_noise_bound = 1.0; // pixels
   const double trans_err = 5.0;
   const double rot_err = 5.0;
-  const double matched_pts_inlier_ratio = 1.0;
+  const double matched_pts_inlier_ratio = 0.7;
   const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
 
   size_t num_iters = 1000;
