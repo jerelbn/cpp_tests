@@ -818,6 +818,8 @@ int main(int argc, char* argv[])
   double tran_error_mean = 0.0;
   double rot_error_var = 0.0;
   double tran_error_var = 0.0;
+  double reproj_error_mean = 0.0;
+  double reproj_error_var = 0.0;
   double lambda_min_mean = 0.0;
   double lambda_min_var = 0.0;
   double match_pts_mean = 0.0;
@@ -901,26 +903,31 @@ int main(int argc, char* argv[])
     double rot_error = Vector3d(q - q_hat).norm();
     double tran_error = common::angDiffBetweenVecs(t, et_hat);
 
+    // Reprojection error ignoring translation
+    Matrix3d K_inv = K.inverse();
+    vector<double> reproj_errs(matches.size());
+    int idx = 0;
+    for (int i = 0; i < matches.size(); ++i)
+    {
+      if (matches[i].p1.id > 999999) continue;
+      Vector3d k1 = K_inv*matches[i].p1.vec3();
+      Vector3d reproj_no_tran_true = K*q.rot(k1); reproj_no_tran_true /= reproj_no_tran_true(2);
+      Vector3d reproj_no_tran_hat = K*q_hat.rot(k1); reproj_no_tran_hat /= reproj_no_tran_hat(2);
+      reproj_errs.push_back((reproj_no_tran_true - reproj_no_tran_hat).norm());
+    }
+    double reproj_error = accumulate(reproj_errs.begin(), reproj_errs.end(), 0.0)/reproj_errs.size();
+
     // Show debug output if solution is not close enough to truth
     if (rot_error > error_tol || tran_error > error_tol)
     {
       ++num_bad_iters;
-      Vector3d p1 = matches[0].p1.vec3();
-      Vector3d p2 = matches[0].p2.vec3();
-      Vector3d p12 = K*q.rot(K.inverse()*p1)/common::e3.dot(K*q.rot(K.inverse()*p1));
-      Vector3d p12hat = K*q_hat.rot(K.inverse()*p1)/common::e3.dot(K*q_hat.rot(K.inverse()*p1));
       cout << "\n\n";
       cout << "            Calc time taken: " << dt_calc << " seconds\n";
-      cout << "    True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
-      cout << " True translation magnitude: " << t.norm() << " meters\n";
-      cout << "           Rotational error: " << rot_error*180/M_PI << " degrees\n";
-      cout << "Translation direction error: " << tran_error*180/M_PI << " degrees\n";
       cout << "    Number of point matches: " << matches.size() << "\n";
-      cout << "                         p1: " << p1.transpose() << "\n";
-      cout << "                         p2: " << p2.transpose() << "\n";
-      cout << "                       p 12: " << p12.transpose() << "\n";
-      cout << "                     p12hat: " << p12hat.transpose() << "\n";
-      cout << "                        q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
+      cout << "             Rotation truth: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
+      cout << "             Rotation error: " << rot_error*180/M_PI << " degrees\n";
+      cout << "Translation direction truth: " << t.norm() << " meters\n";
+      cout << "Translation direction error: " << tran_error*180/M_PI << " degrees\n";
       cout << "                      q_hat: " << q_hat.toEigen().transpose() << "\n";
       cout << "                     q_true: " << q.toEigen().transpose() << "\n";
       cout << "                     et_hat: " << et_hat.transpose() << "\n";
@@ -930,26 +937,30 @@ int main(int argc, char* argv[])
 
     // Recursive error and variance of things
     dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
+    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
     rot_error_mean = (n_stats*rot_error_mean + rot_error)/(n_stats+1);
     tran_error_mean = (n_stats*tran_error_mean + tran_error)/(n_stats+1);
-    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
+    reproj_error_mean = (n_stats*reproj_error_mean + reproj_error)/(n_stats+1);
     if (n_stats > 0)
     {
       dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
+      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
       rot_error_var = ((n_stats-1)*rot_error_var + pow(rot_error - rot_error_mean, 2.0))/n_stats;
       tran_error_var = ((n_stats-1)*tran_error_var + pow(tran_error - tran_error_mean, 2.0))/n_stats;
-      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
+      reproj_error_var = ((n_stats-1)*reproj_error_var + pow(reproj_error - reproj_error_mean, 2.0))/n_stats;
     }
     ++n_stats;
   }
   auto tf = duration_cast<microseconds>(high_resolution_clock::now() - t0).count()*1e-6;
-  cout << "        Total time taken: " << tf << " seconds\n";
-  cout << "         Error tolerance: " << error_tol*180/M_PI << " degrees\n";
-  cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
-  cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
-  cout << " Rot error (mean, stdev): (" << rot_error_mean*180/M_PI << ", " << sqrt(rot_error_var)*180/M_PI << ") degrees\n";
-  cout << "Tran error (mean, stdev): (" << tran_error_mean*180/M_PI << ", " << sqrt(tran_error_var)*180/M_PI << ") degrees\n";
-  cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
+  cout << "\n\n";
+  cout << "                Total time taken: " << tf << " seconds\n";
+  cout << "                 Error tolerance: " << error_tol*180/M_PI << " degrees\n";
+  cout << "        Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
+  cout << "         Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
+  cout << "         match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n";
+  cout << "         Rot error (mean, stdev): (" << rot_error_mean*180/M_PI << ", " << sqrt(rot_error_var)*180/M_PI << ") degrees\n";
+  cout << "        Tran error (mean, stdev): (" << tran_error_mean*180/M_PI << ", " << sqrt(tran_error_var)*180/M_PI << ") degrees\n";
+  cout << "Reprojection error (mean, stdev): (" << reproj_error_mean*180/M_PI << ", " << sqrt(reproj_error_var)*180/M_PI << ")\n\n";
 
   return 0;
 }
