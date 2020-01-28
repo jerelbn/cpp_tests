@@ -12,7 +12,7 @@ find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 # find_package(GTest REQUIRED)
 # find_package(OpenCV REQUIRED)
-# find_package(Ceres REQUIRED)
+find_package(Ceres REQUIRED)
 
 add_subdirectory(lib/common_cpp)
 
@@ -21,7 +21,7 @@ include_directories(include
   ${EIGEN3_INCLUDE_DIRS}
   ${YAML_CPP_INCLUDE_DIR}
   # ${OPENCV_INCLUDE_DIRS}
-  # ${CERES_INCLUDE_DIRS}
+  ${CERES_INCLUDE_DIRS}
   )
 
 add_executable(homography_decomposition
@@ -38,4 +38,5 @@ add_executable(rotation_from_two_images
 target_link_libraries(rotation_from_two_images
   common_cpp
   ${YAML_CPP_LIBRARIES}
+  ${CERES_LIBRARIES}
   )

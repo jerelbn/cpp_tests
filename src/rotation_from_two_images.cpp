@@ -8,6 +8,7 @@ Rotation From Two Images - calculate only the rotation matrix from matched point
 
 */
 #include <chrono>
+#include <ceres/ceres.h>
 #include "common_cpp/common.h"
 #include "common_cpp/quaternion.h"
 #include "common_cpp/transform.h"
@@ -258,7 +259,6 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
 
   static const bool refine_solution = true;
 
-  Matrix3d Ax, Ay, Az, Axy, Axz, Ayz;
   vector<Match> inliers, inliers_final, matches_shuffled;
   static const Matrix3d K_inv = K.inverse();
   for (int ii = 0; ii < RANSAC_iters; ++ii)
@@ -609,6 +609,249 @@ common::Quaterniond rotationFromPointsKneipRANSAC(const Matrix3d& K, const vecto
 }
 
 
+double sampson(const Matrix3d& K, const Vector3d& nu1, const Vector3d& nu2,
+               const common::Quaterniond& q, const common::Quaterniond& qt)
+{
+  Matrix3d K_inv = K.inverse();
+  Matrix3d R = q.R();
+  Vector3d et = qt.uvec();
+
+  Vector3d k1 = K_inv*nu1;
+  Vector3d k2 = K_inv*nu2;
+  
+  Matrix3d E = common::skew(et)*R;
+  RowVector3d k2TE = k2.transpose()*E;
+  Vector3d Ek1 = E*k1;
+
+  double val = k2TE(0)*k2TE(0) + k2TE(1)*k2TE(1) + Ek1(0)*Ek1(0) + Ek1(1)*Ek1(1);
+  return k2.dot(Ek1)/sqrt(val);
+}
+
+
+void sampsonDerivative(const Matrix3d& K, const Vector3d& nu1, const Vector3d& nu2,
+                       const common::Quaterniond& q, const common::Quaterniond& qt, Matrix<double,1,5>& dS)
+{
+  Matrix3d K_inv = K.inverse();
+  Matrix3d R = q.R();
+  Vector3d et = qt.uvec();
+
+  Vector3d k1 = K_inv*nu1;
+  Vector3d k2 = K_inv*nu2;
+  
+  Matrix3d E = common::skew(et)*R;
+  RowVector3d k2TE = k2.transpose()*E;
+  Vector3d Ek1 = E*k1;
+
+  double val = k2TE(0)*k2TE(0) + k2TE(1)*k2TE(1) + Ek1(0)*Ek1(0) + Ek1(1)*Ek1(1);
+  double S = k2.dot(Ek1)/sqrt(val);
+  
+  Matrix3d dE_dq1 = -common::skew(et)*common::skew(common::e1)*R;
+  Matrix3d dE_dq2 = -common::skew(et)*common::skew(common::e2)*R;
+  Matrix3d dE_dq3 = -common::skew(et)*common::skew(common::e3)*R;
+  Matrix3d dE_dqt1 = common::skew((qt.proj()*Vector2d(1,0)).cross(et))*R;
+  Matrix3d dE_dqt2 = common::skew((qt.proj()*Vector2d(0,1)).cross(et))*R;
+
+  dS(0) = (k2.dot(dE_dq1*k1)*sqrt(val) - S*(k2TE(0)*k2.dot(dE_dq1.col(0)) + k2TE(1)*k2.dot(dE_dq1.col(1)) + Ek1(0)*(dE_dq1*k1)(0) + Ek1(1)*(dE_dq1*k1)(1)))/val;
+  dS(1) = (k2.dot(dE_dq2*k1)*sqrt(val) - S*(k2TE(0)*k2.dot(dE_dq2.col(0)) + k2TE(1)*k2.dot(dE_dq2.col(1)) + Ek1(0)*(dE_dq2*k1)(0) + Ek1(1)*(dE_dq2*k1)(1)))/val;
+  dS(2) = (k2.dot(dE_dq3*k1)*sqrt(val) - S*(k2TE(0)*k2.dot(dE_dq3.col(0)) + k2TE(1)*k2.dot(dE_dq3.col(1)) + Ek1(0)*(dE_dq3*k1)(0) + Ek1(1)*(dE_dq3*k1)(1)))/val;
+  dS(3) = (k2.dot(dE_dqt1*k1)*sqrt(val) - S*(k2TE(0)*k2.dot(dE_dqt1.col(0)) + k2TE(1)*k2.dot(dE_dqt1.col(1)) + Ek1(0)*(dE_dqt1*k1)(0) + Ek1(1)*(dE_dqt1*k1)(1)))/val;
+  dS(4) = (k2.dot(dE_dqt2*k1)*sqrt(val) - S*(k2TE(0)*k2.dot(dE_dqt2.col(0)) + k2TE(1)*k2.dot(dE_dqt2.col(1)) + Ek1(0)*(dE_dqt2*k1)(0) + Ek1(1)*(dE_dqt2*k1)(1)))/val;
+}
+
+
+
+
+void sampsonDerivativeNumerical(const Matrix3d& K, const Vector3d& nu1, const Vector3d& nu2,
+                                const common::Quaterniond& q, const common::Quaterniond& qt, Matrix<double,1,5>& dS)
+{
+  static const double eps = 1e-6;
+  for (int i = 0; i < 3; ++i)
+  {
+    common::Quaterniond qp = q + eps * common::I_3x3.col(i);
+    common::Quaterniond qm = q + -eps * common::I_3x3.col(i);
+    double Sp = sampson(K, nu1, nu2, qp, qt);
+    double Sm = sampson(K, nu1, nu2, qm, qt);
+    dS(i) = (Sp - Sm)/(2.0*eps);
+  }
+  for (int i = 0; i < 2; ++i)
+  {
+    common::Quaterniond qtp = common::Quaterniond::exp(eps*qt.proj()*common::I_2x2.col(i))*qt;
+    common::Quaterniond qtm = common::Quaterniond::exp(-eps*qt.proj()*common::I_2x2.col(i))*qt;
+    double Sp = sampson(K, nu1, nu2, q, qtp);
+    double Sm = sampson(K, nu1, nu2, q, qtm);
+    dS(i+3) = (Sp - Sm)/(2.0*eps);
+  }
+}
+
+
+void sampsonLM(common::Quaterniond& q, Vector3d& et,
+               const int& max_iters, const double& exit_tol,
+               const double& lambda0, const double& lambda_adjust,
+               const Matrix3d& K, const vector<Match>& matches)
+{
+  double lambda = lambda0;
+  Matrix3d K_inv = K.inverse();
+
+  common::Quaterniond q_new, qt(et), qt_new;
+  Matrix<double,1,5> dS;
+  Matrix<double,5,1> b, delta;
+  Matrix<double,5,5> H, H_diag, A;
+  unsigned N = matches.size();
+  VectorXd cost(N), cost_new(N);
+  MatrixXd J(N,5);
+  bool prev_fail = false;
+  for (int i = 0; i < max_iters; ++i)
+  {
+    if (!prev_fail)
+    {
+      // Build cost function and Jacobian
+      for (int j = 0; j < N; ++j)
+      {
+        cost(j) = sampson(K, matches[j].p1.vec3(), matches[j].p2.vec3(), q, qt);
+        sampsonDerivative(K, matches[j].p1.vec3(), matches[j].p2.vec3(), q, qt, dS);
+        // sampsonDerivativeNumerical(K, matches[j].p1.vec3(), matches[j].p2.vec3(), q, qt, dS);
+        J.row(j) = dS;
+      }
+      H = J.transpose()*J;
+      b = -J.transpose()*cost;
+    }
+    H_diag = H.diagonal().asDiagonal();
+    A = H + lambda*H_diag;
+    delta = A.householderQr().solve(b);
+
+    // Compute cost with new parameters
+    q_new = q + delta.head<3>();
+    qt_new = common::Quaterniond::boxplus_uvec(qt, delta.tail<2>());
+    for (int j = 0; j < N; ++j)
+      cost_new(j) = sampson(K, matches[j].p1.vec3(), matches[j].p2.vec3(), q_new, qt_new);
+    if (cost_new.dot(cost_new) < cost.dot(cost))
+    {
+      q = q_new;
+      qt = qt_new;
+      lambda /= lambda_adjust;
+      prev_fail = false;
+    }
+    else
+    {
+      lambda *= lambda_adjust;
+      prev_fail = true;
+    }
+
+    if (delta.norm() < exit_tol) break;
+  }
+  et = qt.uvec();
+}
+
+
+struct S3Plus
+{
+  template<typename T>
+  bool operator()(const T* _q1, const T* _delta, T* _q2) const
+  {
+    common::Quaternion<T> q1(_q1);
+    Map<const Matrix<T,3,1>> delta(_delta);
+    Map<Matrix<T,4,1>> q2(_q2);
+    q2 = (q1 + delta).toEigen();
+    return true;
+  }
+};
+
+
+struct S2Plus
+{
+  template<typename T>
+  bool operator()(const T* _q1, const T* _delta, T* _q2) const
+  {
+    common::Quaternion<T> q1(_q1);
+    Map<const Matrix<T,2,1>> delta(_delta);
+    Map<Matrix<T,4,1>> q2(_q2);
+    q2 = (common::Quaternion<T>::exp(q1.proj() * delta) * q1).toEigen();
+    return true;
+  }
+};
+
+
+struct SampsonError
+{
+  SampsonError(const Vector3d& _e1, const Vector3d& _e2)
+      : e1(_e1), e2(_e2) {}
+
+  template <typename T>
+  bool operator()(const T* const _q, const T* _qt, T* residuals) const
+  {
+    // Map data
+    common::Quaternion<T> q(_q);
+    common::Quaternion<T> qt(_qt);
+
+    // Construct residual
+    Matrix<T,3,3> E = q.R() * common::skew(qt.uvec());
+    Matrix<T,1,3> e1T_E = e1.cast<T>().transpose() * E;
+    Matrix<T,3,1> E_e2 = E * e2.cast<T>();
+    T e1T_E_e2 = e1.cast<T>().transpose() * E_e2;
+    residuals[0] = e1T_E_e2 / sqrt(e1T_E(0) * e1T_E(0) + e1T_E(1) * e1T_E(1) + E_e2(0) * E_e2(0) + E_e2(1) * E_e2(1));
+    return true;
+  }
+
+private:
+
+  const Vector3d e1, e2;
+
+};
+
+
+// Relative pose optimizer using the Ceres Solver
+void optimizePose(common::Quaterniond& q, common::Quaterniond& qt,
+                  const vector<Match>& matches,
+                  const unsigned &iters)
+{
+  // Build optimization problem with Ceres-Solver
+  ceres::Problem problem;
+
+  // Does passing a dynamic rvalue result in a memory leak?
+  problem.AddParameterBlock(q.data(), 4, new ceres::AutoDiffLocalParameterization<S3Plus,4,3>);
+  problem.AddParameterBlock(qt.data(), 4, new ceres::AutoDiffLocalParameterization<S2Plus,4,2>);
+
+  for (int i = 0; i < matches.size(); ++i)
+    problem.AddResidualBlock(new ceres::AutoDiffCostFunction<SampsonError, 1, 4, 4>
+    (new SampsonError(matches[i].p1.vec3(), matches[i].p2.vec3())), NULL, q.data(), qt.data());
+
+  // Solve for the optimal rotation and translation direciton
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::DENSE_QR;
+  options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+  options.max_num_iterations = iters;
+  options.minimizer_progress_to_stdout = false;
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &problem, &summary);
+  std::cout << summary.FullReport() << "\n\n";
+}
+
+
+void rotationFromPointsHaSampson(const Matrix3d& K, const vector<Match>& matches, common::Quaterniond& q, Vector3d& et)
+{
+  static const int max_iters = 100;
+  static const double exit_tol = 1e-6;
+  static const double lambda_adjust = 10.0;
+  static const double lambda0 = 1.0;
+  Matrix3d K_inv = K.inverse();
+
+  // Initial guess of rotation
+  linearSolutionHa(K, matches, q);
+
+  // Initial guess of translation
+  et.setZero();
+  for (const auto& match : matches)
+    et += K_inv*match.p2.vec3() - q.rot(K_inv*match.p1.vec3());
+  et = (et/(matches.size()-1)).normalized();
+  
+  common::Quaterniond qt(et);
+
+  // Refine using Sampson error
+  // sampsonLM(q, et, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
+  optimizePose(q, qt, matches, 20);
+}
+
+
 
 
 /*================================= MAIN =================================*/
@@ -641,19 +884,20 @@ int main(int argc, char* argv[])
   // - 1: Ha solver w/ RANSAC
   // - 2: Kneip solver
   // - 3: Kneip solver w/ RANSAC
-  int solver = 1;
+  // - 4: Ha solver w/ Sampson
+  int solver = 4;
 
-  double zI_offset = 1000;
+  double zI_offset = 10;
   const unsigned N = 31; // number of points along single grid line
-  const double pix_noise_bound = 1.0; // pixels
-  const double trans_err = 5.0;
-  const double rot_err = 5.0;
-  const double matched_pts_inlier_ratio = 0.7;
+  const double pix_noise_bound = 0.0; // pixels
+  const double trans_err = 1.0;
+  const double rot_err = 1.0; // degrees
+  const double matched_pts_inlier_ratio = 1.0;
   const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
 
-  size_t num_iters = 1000;
+  size_t num_iters = 1;
   size_t num_bad_iters = 0;
-  double error_tol = 5.0*M_PI/180;
+  double error_tol = 0.0*M_PI/180;
 
 
   double dt_calc_mean = 0.0; // seconds
@@ -706,6 +950,7 @@ int main(int argc, char* argv[])
     }
 
     common::Quaterniond q_hat;
+    Vector3d et_hat;
     auto t_calc_0 = high_resolution_clock::now();
     if (solver == 0)
       q_hat = rotationFromPointsHa(K, matches);
@@ -715,14 +960,17 @@ int main(int argc, char* argv[])
       q_hat = rotationFromPointsKneip(K, matches);
     else if (solver == 3)
       q_hat = rotationFromPointsKneipRANSAC(K, matches);
+    else if (solver == 4)
+      rotationFromPointsHaSampson(K, matches, q_hat, et_hat);
     else
       throw runtime_error("Select an existing solver!");
     double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
 
     // Compute true rotation and translation and rotation error
     common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
-    Vector3d t = x2.p() - x1.p();
-    double rot_error = common::Quaterniond::log(q.inv()*q_hat).norm();
+    Vector3d t = x2.q().rot(x1.p() - x2.p());
+    double rot_error = Vector3d(q - q_hat).norm();
+    double tran_error = common::angDiffBetweenVecs(t, et_hat);
 
     // Show debug output if solution is not close enough to truth
     if (rot_error > error_tol)
@@ -733,18 +981,21 @@ int main(int argc, char* argv[])
       Vector3d p12 = K*q.rot(K.inverse()*p1)/common::e3.dot(K*q.rot(K.inverse()*p1));
       Vector3d p12hat = K*q_hat.rot(K.inverse()*p1)/common::e3.dot(K*q_hat.rot(K.inverse()*p1));
       cout << "\n\n";
-      cout << "           Calc time taken: " << dt_calc << " seconds\n";
-      cout << "   True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
-      cout << "True translation magnitude: " << t.norm() << " meters\n";
-      cout << "                     Error: " << rot_error*180/M_PI << " degrees\n";
-      cout << "   Number of point matches: " << matches.size() << "\n";
-      cout << "                        p1: " << p1.transpose() << "\n";
-      cout << "                        p2: " << p2.transpose() << "\n";
-      cout << "                      p 12: " << p12.transpose() << "\n";
-      cout << "                    p12hat: " << p12hat.transpose() << "\n";
-      cout << "                       q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
-      cout << "                     q_hat: " << q_hat.toEigen().transpose() << "\n";
-      cout << "                    q_true: " << q.toEigen().transpose() << "\n\n";
+      cout << "            Calc time taken: " << dt_calc << " seconds\n";
+      cout << "    True rotation magnitude: " << common::Quaterniond::log(q).norm()*180/M_PI << " degrees\n";
+      cout << " True translation magnitude: " << t.norm() << " meters\n";
+      cout << "           Rotational error: " << rot_error*180/M_PI << " degrees\n";
+      cout << "Translation direction error: " << tran_error*180/M_PI << " degrees\n";
+      cout << "    Number of point matches: " << matches.size() << "\n";
+      cout << "                         p1: " << p1.transpose() << "\n";
+      cout << "                         p2: " << p2.transpose() << "\n";
+      cout << "                       p 12: " << p12.transpose() << "\n";
+      cout << "                     p12hat: " << p12hat.transpose() << "\n";
+      cout << "                        q_0: " << rotationFromPointsHa(K, matches).toEigen().transpose() << "\n";
+      cout << "                      q_hat: " << q_hat.toEigen().transpose() << "\n";
+      cout << "                     q_true: " << q.toEigen().transpose() << "\n";
+      cout << "                     et_hat: " << et_hat.transpose() << "\n";
+      cout << "                    et_true: " << t.normalized().transpose() << "\n\n";
       continue; // Bad solutions aren't useful in the following statistics
     }
 
