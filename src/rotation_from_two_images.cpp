@@ -8,7 +8,6 @@ Rotation From Two Images - calculate only the rotation matrix from matched point
 
 */
 #include <chrono>
-#include <ceres/ceres.h>
 #include "common_cpp/common.h"
 #include "common_cpp/quaternion.h"
 #include "common_cpp/transform.h"
@@ -255,9 +254,9 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
   static const double lambda0 = 1.0;
 
   static const int RANSAC_iters = 16;
-  static const double RANSAC_thresh = 10.0;
+  static const double RANSAC_thresh = 50.0;
 
-  static const bool refine_solution = true;
+  static const bool refine_solution = false;
 
   vector<Match> inliers, inliers_final, matches_shuffled;
   static const Matrix3d K_inv = K.inverse();
@@ -743,93 +742,9 @@ void sampsonLM(common::Quaterniond& q, Vector3d& et,
 }
 
 
-struct S3Plus
-{
-  template<typename T>
-  bool operator()(const T* _q1, const T* _delta, T* _q2) const
-  {
-    common::Quaternion<T> q1(_q1);
-    Map<const Matrix<T,3,1>> delta(_delta);
-    Map<Matrix<T,4,1>> q2(_q2);
-    q2 = (q1 + delta).toEigen();
-    return true;
-  }
-};
-
-
-struct S2Plus
-{
-  template<typename T>
-  bool operator()(const T* _q1, const T* _delta, T* _q2) const
-  {
-    common::Quaternion<T> q1(_q1);
-    Map<const Matrix<T,2,1>> delta(_delta);
-    Map<Matrix<T,4,1>> q2(_q2);
-    q2 = (common::Quaternion<T>::exp(q1.proj() * delta) * q1).toEigen();
-    return true;
-  }
-};
-
-
-struct SampsonError
-{
-  SampsonError(const Vector3d& _e1, const Vector3d& _e2)
-      : e1(_e1), e2(_e2) {}
-
-  template <typename T>
-  bool operator()(const T* const _q, const T* _qt, T* residuals) const
-  {
-    // Map data
-    common::Quaternion<T> q(_q);
-    common::Quaternion<T> qt(_qt);
-
-    // Construct residual
-    Matrix<T,3,3> E = q.R() * common::skew(qt.uvec());
-    Matrix<T,1,3> e1T_E = e1.cast<T>().transpose() * E;
-    Matrix<T,3,1> E_e2 = E * e2.cast<T>();
-    T e1T_E_e2 = e1.cast<T>().transpose() * E_e2;
-    residuals[0] = e1T_E_e2 / sqrt(e1T_E(0) * e1T_E(0) + e1T_E(1) * e1T_E(1) + E_e2(0) * E_e2(0) + E_e2(1) * E_e2(1));
-    return true;
-  }
-
-private:
-
-  const Vector3d e1, e2;
-
-};
-
-
-// Relative pose optimizer using the Ceres Solver
-void optimizePose(common::Quaterniond& q, common::Quaterniond& qt,
-                  const vector<Match>& matches,
-                  const unsigned &iters)
-{
-  // Build optimization problem with Ceres-Solver
-  ceres::Problem problem;
-
-  // Does passing a dynamic rvalue result in a memory leak?
-  problem.AddParameterBlock(q.data(), 4, new ceres::AutoDiffLocalParameterization<S3Plus,4,3>);
-  problem.AddParameterBlock(qt.data(), 4, new ceres::AutoDiffLocalParameterization<S2Plus,4,2>);
-
-  for (int i = 0; i < matches.size(); ++i)
-    problem.AddResidualBlock(new ceres::AutoDiffCostFunction<SampsonError, 1, 4, 4>
-    (new SampsonError(matches[i].p1.vec3(), matches[i].p2.vec3())), NULL, q.data(), qt.data());
-
-  // Solve for the optimal rotation and translation direciton
-  ceres::Solver::Options options;
-  options.linear_solver_type = ceres::DENSE_QR;
-  options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-  options.max_num_iterations = iters;
-  options.minimizer_progress_to_stdout = false;
-  ceres::Solver::Summary summary;
-  ceres::Solve(options, &problem, &summary);
-  std::cout << summary.FullReport() << "\n\n";
-}
-
-
 void rotationFromPointsHaSampson(const Matrix3d& K, const vector<Match>& matches, common::Quaterniond& q, Vector3d& et)
 {
-  static const int max_iters = 100;
+  static const int max_iters = 1000;
   static const double exit_tol = 1e-6;
   static const double lambda_adjust = 10.0;
   static const double lambda0 = 1.0;
@@ -841,14 +756,11 @@ void rotationFromPointsHaSampson(const Matrix3d& K, const vector<Match>& matches
   // Initial guess of translation
   et.setZero();
   for (const auto& match : matches)
-    et += K_inv*match.p2.vec3() - q.rot(K_inv*match.p1.vec3());
+    et += (K_inv*match.p2.vec3() - q.rot(K_inv*match.p1.vec3())).normalized();
   et = (et/(matches.size()-1)).normalized();
-  
-  common::Quaterniond qt(et);
 
   // Refine using Sampson error
-  // sampsonLM(q, et, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
-  optimizePose(q, qt, matches, 20);
+  sampsonLM(q, et, max_iters, exit_tol, lambda0, lambda_adjust, K, matches);
 }
 
 
@@ -885,25 +797,27 @@ int main(int argc, char* argv[])
   // - 2: Kneip solver
   // - 3: Kneip solver w/ RANSAC
   // - 4: Ha solver w/ Sampson
-  int solver = 4;
+  int solver = 1;
 
-  double zI_offset = 10;
+  double zI_offset = 1000;
   const unsigned N = 31; // number of points along single grid line
-  const double pix_noise_bound = 0.0; // pixels
-  const double trans_err = 1.0;
-  const double rot_err = 1.0; // degrees
-  const double matched_pts_inlier_ratio = 1.0;
+  const double pix_noise_bound = 1.0; // pixels
+  const double trans_err = 5.0;
+  const double rot_err = 5.0; // degrees
+  const double matched_pts_inlier_ratio = 0.6;
   const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
 
-  size_t num_iters = 1;
+  size_t num_iters = 1000;
   size_t num_bad_iters = 0;
-  double error_tol = 0.0*M_PI/180;
+  double error_tol = 45.0*M_PI/180;
 
 
   double dt_calc_mean = 0.0; // seconds
   double dt_calc_var = 0.0; // seconds
-  double error_mean = 0.0;
-  double error_var = 0.0;
+  double rot_error_mean = 0.0;
+  double tran_error_mean = 0.0;
+  double rot_error_var = 0.0;
+  double tran_error_var = 0.0;
   double lambda_min_mean = 0.0;
   double lambda_min_var = 0.0;
   double match_pts_mean = 0.0;
@@ -949,31 +863,46 @@ int main(int argc, char* argv[])
       continue;
     }
 
+    // Compute true rotation and translation
+    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
+    Vector3d t = q_cb2c.rot(x2.q().rot(x1.p() - x2.p()));
+
+    // Run estimator
     common::Quaterniond q_hat;
     Vector3d et_hat;
     auto t_calc_0 = high_resolution_clock::now();
     if (solver == 0)
+    {
       q_hat = rotationFromPointsHa(K, matches);
+      et_hat = t.normalized();
+    }
     else if (solver == 1)
+    {
       q_hat = rotationFromPointsHaRANSAC(K, matches);
+      et_hat = t.normalized();
+    }
     else if (solver == 2)
+    {
       q_hat = rotationFromPointsKneip(K, matches);
+      et_hat = t.normalized();
+    }
     else if (solver == 3)
+    {
       q_hat = rotationFromPointsKneipRANSAC(K, matches);
+      et_hat = t.normalized();
+    }
     else if (solver == 4)
       rotationFromPointsHaSampson(K, matches, q_hat, et_hat);
     else
       throw runtime_error("Select an existing solver!");
     double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
-
-    // Compute true rotation and translation and rotation error
-    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
-    Vector3d t = x2.q().rot(x1.p() - x2.p());
+ 
+    // Compute error in relative pose
     double rot_error = Vector3d(q - q_hat).norm();
     double tran_error = common::angDiffBetweenVecs(t, et_hat);
 
     // Show debug output if solution is not close enough to truth
-    if (rot_error > error_tol)
+    if (rot_error > error_tol || tran_error > error_tol)
     {
       ++num_bad_iters;
       Vector3d p1 = matches[0].p1.vec3();
@@ -1001,12 +930,14 @@ int main(int argc, char* argv[])
 
     // Recursive error and variance of things
     dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
-    error_mean = (n_stats*error_mean + rot_error)/(n_stats+1);
+    rot_error_mean = (n_stats*rot_error_mean + rot_error)/(n_stats+1);
+    tran_error_mean = (n_stats*tran_error_mean + tran_error)/(n_stats+1);
     match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
     if (n_stats > 0)
     {
       dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
-      error_var = ((n_stats-1)*error_var + pow(rot_error - error_mean, 2.0))/n_stats;
+      rot_error_var = ((n_stats-1)*rot_error_var + pow(rot_error - rot_error_mean, 2.0))/n_stats;
+      tran_error_var = ((n_stats-1)*tran_error_var + pow(tran_error - tran_error_mean, 2.0))/n_stats;
       match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
     }
     ++n_stats;
@@ -1016,7 +947,8 @@ int main(int argc, char* argv[])
   cout << "         Error tolerance: " << error_tol*180/M_PI << " degrees\n";
   cout << "Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
   cout << " Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
-  cout << "     Error (mean, stdev): (" << error_mean*180/M_PI << ", " << sqrt(error_var)*180/M_PI << ") degrees\n";
+  cout << " Rot error (mean, stdev): (" << rot_error_mean*180/M_PI << ", " << sqrt(rot_error_var)*180/M_PI << ") degrees\n";
+  cout << "Tran error (mean, stdev): (" << tran_error_mean*180/M_PI << ", " << sqrt(tran_error_var)*180/M_PI << ") degrees\n";
   cout << " match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n\n";
 
   return 0;
