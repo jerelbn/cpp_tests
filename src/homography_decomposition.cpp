@@ -13,12 +13,10 @@ Homography decomposition testing
 #include "common_cpp/transform.h"
 
 using namespace std;
+using namespace chrono;
 using namespace Eigen;
 
-static const common::Quaterniond q_cb2c = [] {
-  common::Quaterniond q(M_PI/2, 0, M_PI/2);
-  return q;
-}();
+static const common::Quaterniond q_cb2c = common::Quaterniond::fromEulerZYX(M_PI/2, 0, M_PI/2);
 
 struct Point
 {
@@ -33,156 +31,13 @@ struct Point
   unsigned id;
 };
 
-vector<Point> createInertialPoints(const unsigned& N, const double& bound);
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x);
-void imagePointMatches(const vector<Point>& pts_1, const vector<Point>& pts_2, vector<Point>& matches_1, vector<Point>& matches_2);
-Matrix3d homographyFromPoints(const vector<Point>& matches_1, const vector<Point>& matches_2);
-Matrix3d homographyFromGeometry(const Matrix3d& K, const common::Transformd& x1, const common::Transformd& x2);
-Matrix3d euclideanHomography(const Matrix3d& K, const Matrix3d& G);
-void decomposeEuclideanHomography(const Matrix3d& H,
-                                  vector<Matrix3d, aligned_allocator<Matrix3d> >& Rs,
-                                  vector<Vector3d, aligned_allocator<Vector3d> >& ts,
-                                  vector<Vector3d, aligned_allocator<Vector3d> >& ns);
-void eliminateInvalidSolutions(const vector<Point>& pts, const Matrix3d& K,
-                               vector<Matrix3d, aligned_allocator<Matrix3d> >& Rs,
-                               vector<Vector3d, aligned_allocator<Vector3d> >& ts,
-                               vector<Vector3d, aligned_allocator<Vector3d> >& ns);
-
-
-
-/*================================= MAIN =================================*/
-
-int main(int argc, char* argv[])
+struct Match
 {
-  // Random parameters
-  auto t0 = chrono::high_resolution_clock::now();
-  size_t seed = time(0);
-  default_random_engine rng(seed);
-  uniform_real_distribution<double> dist(-1.0, 1.0);
-
-  // Camera parameters
-  double fx = 600;
-  double fy = 600;
-  double cx = 320;
-  double cy = 240;
-  Matrix3d K = Matrix3d::Identity();
-  K(0,0) = fx;
-  K(1,1) = fy;
-  K(0,2) = cx;
-  K(1,2) = cy;
-
-  size_t num_iters = 1000;
-  size_t num_bad_solutions = 0;
-  for (size_t iter = 0; iter < num_iters; ++iter)
-  {
-    cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << std::flush;
-
-    // Camera poses
-    double p1_n = -150 + 5.0*dist(rng);
-    double p1_e = 5.0*dist(rng);
-    double p1_d = 5.0*dist(rng);
-
-    double p1_r = 5.0*M_PI/180.0*dist(rng);
-    double p1_p = 5.0*M_PI/180.0*dist(rng);
-    double p1_y = 5.0*M_PI/180.0*dist(rng);
-
-    double p2_n = -150 + 5.0*dist(rng);
-    double p2_e = 5.0*dist(rng);
-    double p2_d = 5.0*dist(rng);
-
-    double p2_r = 5.0*M_PI/180.0*dist(rng);
-    double p2_p = 5.0*M_PI/180.0*dist(rng);
-    double p2_y = 5.0*M_PI/180.0*dist(rng);
-
-    common::Transformd x1, x2;
-    x1.setP(Vector3d(p1_n, p1_e, p1_d));
-    x2.setP(Vector3d(p2_n, p2_e, p2_d));
-    x1.setQ(common::Quaterniond(p1_r, p1_p, p1_y));
-    x2.setQ(common::Quaterniond(p2_r, p2_p, p2_y));
-
-    // Planar points (NED)
-    // - N x N grid within +-bound in east and down directions
-    const unsigned N = 101;
-    const double bound = 50;
-    vector<Point> pts_I = createInertialPoints(N, bound);
-
-    // Project points into each camera image
-    vector<Point> pts_1 = projectPointsToImage(K, pts_I, x1);
-    vector<Point> pts_2 = projectPointsToImage(K, pts_I, x2);
-
-    // Compute homography from matched image points
-    vector<Point> matches_1, matches_2;
-    imagePointMatches(pts_1, pts_2, matches_1, matches_2);
-    if (matches_1.size() < 10) continue;
-    Matrix3d G = homographyFromPoints(matches_1, matches_2);
-
-    // Convert to Euclidean homography
-    Matrix3d H = euclideanHomography(K, G);
-
-    // Decompose H into 4 possible solutions R, t, n
-    vector<Matrix3d, aligned_allocator<Matrix3d> > Rs;
-    vector<Vector3d, aligned_allocator<Vector3d> > ns, ts;
-    decomposeEuclideanHomography(H, Rs, ts, ns);
-
-    // Eliminate impossible solutions
-    eliminateInvalidSolutions(matches_2, K, Rs, ts, ns);
-
-    // Check that true solution is in the resulting solution set
-    double tol = 0.1;
-    bool solution_obtained = false;
-    Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
-    Vector3d t = q_cb2c.rot(x2.q().rot((x2.p() - x1.p()) / x1.p()(0)));
-    Vector3d n = q_cb2c.rot(x1.q().rot(common::e1));
-    for (int i = 0; i < Rs.size(); ++i)
-    {
-      if ((R - Rs[i]).norm() < tol && (t - ts[i]).norm() < tol && (n - ns[i]).norm() < tol)
-      {
-        solution_obtained = true;
-        break;
-      }
-    }
-
-    // Show debug output if solution is not obtained
-    if (!solution_obtained)
-    {
-      ++num_bad_solutions;
-      cout << "\n\n\nTrue solution not found!\n";
-      cout << endl;
-      Vector3d p2_prime = G * matches_1[0].vec3();
-      p2_prime /= p2_prime(2);
-      cout << "point  = " << matches_2[0].vec3().transpose() << endl;
-      cout << "point' = " << p2_prime.transpose() << endl;
-
-      // Compute homography from camera geometry
-      cout << endl;
-      Matrix3d G2 = homographyFromGeometry(K, x1, x2);
-      cout << "G = \n" << G << endl;
-      cout << "G2 = \n" << G2 << endl;
-
-      cout << endl;
-      cout << "H = \n" << H << endl;
-      cout << "H2 = \n" << R + t*n.transpose() << endl;
-
-      for (int i = 0; i < Rs.size(); ++i)
-      {
-        cout << "Solutions:\n\n";
-        cout << "R" << i << " =\n" << Rs[i] << endl;
-        cout << "t" << i << " = " << ts[i].transpose() << endl;
-        cout << "n" << i << " = " << ns[i].transpose() << endl;
-      }
-
-      cout << "Truth: \n\n";
-      cout << "R_true = \n" << R << endl;
-      cout << "t_true = " << t.transpose() << endl;
-      cout << "n_true = " << n.transpose() << endl;
-    }
-  }
-  cout << "\nNumber of bad solutions found: " << num_bad_solutions << " out of " << num_iters << " iterations." << "\n\n";
-  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count();
-  cout << "Time taken: " << tf*1e-6 << " seconds" << endl;
-
-  return 0;
-}
+  Match(const Point& _p1, const Point& _p2)
+    : p1(_p1), p2(_p2) {}
+  
+  Point p1, p2;
+};
 
 
 
@@ -213,59 +68,63 @@ vector<Point> createInertialPoints(const unsigned& N, const double& bound)
 }
 
 
-vector<Point> projectPointsToImage(const Matrix3d& K, const vector<Point>& pts_I, const common::Transformd& x)
+void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
+                                const common::Transformd& x1, const common::Transformd& x2,
+                                const double& pix_noise_bound, const double& matched_pts_inlier_ratio,
+                                vector<Match>& matches)
 {
-  vector<Point> pts_img;
+  matches.clear();
+  double image_size_x = 2*K(0,2);
+  double image_size_y = 2*K(1,2);
   for (const Point& pt_I : pts_I)
   {
     // Transform points into camera frame
-    Vector3d pt_c = q_cb2c.rot(x.transform(pt_I.vec3()));
+    Vector3d pt_c1 = q_cb2c.rotp(x1.transformp(pt_I.vec3()));
+    Vector3d pt_c2 = q_cb2c.rotp(x2.transformp(pt_I.vec3()));
 
     // Project points into image
-    Vector2d pt_img;
-    common::projToImg(pt_img, pt_c, K);
+    Vector2d pt_img1, pt_img2;
+    common::projectToImage(pt_img1, pt_c1, K);
+    common::projectToImage(pt_img2, pt_c2, K);
+    pt_img1 += pix_noise_bound*Vector2d::Random();
+    pt_img2 += pix_noise_bound*Vector2d::Random();
 
     // Save image points inside image bounds
-    if (pt_img(0) >= 0 && pt_img(1) >= 0 && pt_img(0) <= 2*K(0,2) && pt_img(1) <= 2*K(1,2))
-      pts_img.push_back(Point(pt_img(0), pt_img(1), 1, pt_I.id));
-  }
-
-  return pts_img;
-}
-
-
-void imagePointMatches(const vector<Point>& pts_1, const vector<Point>& pts_2, vector<Point>& matches_1, vector<Point>& matches_2)
-{
-  // Collect points with matching ids
-  matches_1.clear();
-  matches_2.clear();
-  for (const auto& p1 : pts_1)
-  {
-    for (const auto& p2 : pts_2)
+    if (pt_img1(0) >= 0 && pt_img1(1) >= 0 && pt_img1(0) <= image_size_x && pt_img1(1) <= image_size_y &&
+        pt_img2(0) >= 0 && pt_img2(1) >= 0 && pt_img2(0) <= image_size_x && pt_img2(1) <= image_size_y)
     {
-      if (p1.id == p2.id)
-      {
-        matches_1.push_back(p1);
-        matches_2.push_back(p2);
-        break;
-      }
+      matches.push_back(Match(Point(pt_img1(0), pt_img1(1), 1, pt_I.id),
+                              Point(pt_img2(0), pt_img2(1), 1, pt_I.id)));
     }
   }
+
+  // Add outliers to matched points
+  double num_inliers = matches.size();
+  while (num_inliers/matches.size() > matched_pts_inlier_ratio)
+  {
+    Vector2d pt_img1, pt_img2;
+    pt_img1(0) = image_size_x*double(rand())/RAND_MAX;
+    pt_img1(1) = image_size_y*double(rand())/RAND_MAX;
+    pt_img2(0) = image_size_x*double(rand())/RAND_MAX;
+    pt_img2(1) = image_size_y*double(rand())/RAND_MAX;
+    matches.push_back(Match(Point(pt_img1(0), pt_img1(1), 1, 999999999),
+                            Point(pt_img2(0), pt_img2(1), 1, 999999999)));
+  }
 }
 
 
-Matrix3d homographyFromPoints(const vector<Point>& matches_1, const vector<Point>& matches_2)
+Matrix3d homographyFromPoints(const vector<Match>& matches)
 {
   // Build solution matrix with point matches
-  unsigned N = 2 * matches_1.size();
+  unsigned N = 2 * matches.size();
   MatrixXd P(N,9);
   P.setZero();
-  for (size_t i = 0; i < matches_1.size(); ++i)
+  for (size_t i = 0; i < matches.size(); ++i)
   {
     size_t idx1 = 2 * i;
     size_t idx2 = 2 * i + 1;
-    Point p1 = matches_1[i];
-    Point p2 = matches_2[i];
+    Point p1 = matches[i].p1;
+    Point p2 = matches[i].p2;
     P(idx1,0) = -p1.x;
     P(idx1,1) = -p1.y;
     P(idx1,2) = -1;
@@ -292,9 +151,9 @@ Matrix3d homographyFromPoints(const vector<Point>& matches_1, const vector<Point
 
 Matrix3d homographyFromGeometry(const Matrix3d& K, const common::Transformd& x1, const common::Transformd& x2)
 {
-  Matrix3d R = (q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c).R();
-  Vector3d t = q_cb2c.rot(x2.q().rot((x2.p() - x1.p()) / x1.p()(0)));
-  Vector3d n = q_cb2c.rot(x1.q().rot(common::e1));
+  Matrix3d R = (q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c).R();
+  Vector3d t = q_cb2c.rotp(x2.q().rotp((x2.p() - x1.p()) / x1.p()(0)));
+  Vector3d n = q_cb2c.rotp(x1.q().rotp(common::e1));
 
   Matrix3d G = K * (R + t*n.transpose()) * K.inverse();
   G /= G(2,2);
@@ -435,7 +294,7 @@ void decomposeEuclideanHomography(const Matrix3d& H,
 
 
 // Eliminate impossible solutions to the homography decomposition with physical constraints
-void eliminateInvalidSolutions(const vector<Point>& pts, const Matrix3d& K,
+void eliminateInvalidSolutions(const vector<Match>& matches, const Matrix3d& K,
                                vector<Matrix3d, aligned_allocator<Matrix3d> >& Rs,
                                vector<Vector3d, aligned_allocator<Vector3d> >& ts,
                                vector<Vector3d, aligned_allocator<Vector3d> >& ns)
@@ -458,9 +317,9 @@ void eliminateInvalidSolutions(const vector<Point>& pts, const Matrix3d& K,
 
     // Check that each point is in front of the camera
     bool pass = true;
-    for (const auto& pt : pts)
+    for (const auto& match : matches)
     {
-      Vector3d m = K.inverse() * pt.vec3();
+      Vector3d m = K.inverse() * match.p2.vec3();
       if (m.dot(R*n) <= 0)
       {
         pass = false;
@@ -476,4 +335,155 @@ void eliminateInvalidSolutions(const vector<Point>& pts, const Matrix3d& K,
       ns.push_back(n);
     }
   }
+}
+
+
+
+
+/*================================= MAIN =================================*/
+
+int main(int argc, char* argv[])
+{
+  // Random parameters
+  auto t0 = high_resolution_clock::now();
+  size_t seed = 0;//time(0);
+  default_random_engine rng(seed);
+  uniform_real_distribution<double> dist(-1.0, 1.0);
+  srand(seed);
+
+  // Camera parameters
+  double cx = 320;
+  double cy = 240;
+  double half_fov_x = 3.0*M_PI/180.0;
+  double half_fov_y = cy/cx*half_fov_x;
+  double fx = cx/tan(half_fov_x);
+  double fy = cy/tan(half_fov_y);
+  Matrix3d K = Matrix3d::Identity();
+  K(0,0) = fx;
+  K(1,1) = fy;
+  K(0,2) = cx;
+  K(1,2) = cy;
+
+
+  double zI_offset = 150;
+  const unsigned N = 51; // number of points along single grid line
+  const double pix_noise_bound = 1.0; // pixels
+  const double trans_err = 5.0;
+  const double rot_err = 5.0; // degrees
+  const double matched_pts_inlier_ratio = 1.0;
+  const double bound = zI_offset*tan(half_fov_x+rot_err*M_PI/180);
+
+  size_t num_iters = 1000;
+  size_t num_bad_iters = 0;
+  double error_tol = 0.1;
+
+
+  for (size_t iter = 0; iter < num_iters; ++iter)
+  {
+    cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
+
+    // Camera poses
+    double p1_n = -zI_offset + trans_err*dist(rng);
+    double p1_e = trans_err*dist(rng);
+    double p1_d = trans_err*dist(rng);
+
+    double p1_r = rot_err*M_PI/180.0*dist(rng);
+    double p1_p = rot_err*M_PI/180.0*dist(rng);
+    double p1_y = rot_err*M_PI/180.0*dist(rng);
+
+    double p2_n = -zI_offset + trans_err*dist(rng);
+    double p2_e = trans_err*dist(rng);
+    double p2_d = trans_err*dist(rng);
+
+    double p2_r = rot_err*M_PI/180.0*dist(rng);
+    double p2_p = rot_err*M_PI/180.0*dist(rng);
+    double p2_y = rot_err*M_PI/180.0*dist(rng);
+
+    common::Transformd x1, x2;
+    x1.p(Vector3d(p1_n, p1_e, p1_d));
+    x2.p(Vector3d(p2_n, p2_e, p2_d));
+    x1.q(common::Quaterniond::fromEulerZYX(p1_r, p1_p, p1_y));
+    x2.q(common::Quaterniond::fromEulerZYX(p2_r, p2_p, p2_y));
+
+    // Planar points (NED)
+    // - N x N grid within +-bound in east and down directions
+    vector<Point> pts_I = createInertialPoints(N, bound);
+
+    // Project matching points into each camera image
+    vector<Match> matches;
+    projectAndMatchImagePoints(K, pts_I, x1, x2, pix_noise_bound, matched_pts_inlier_ratio, matches);
+    if (matches.size() < 8)
+    {
+      --iter; // Try that iteration again
+      continue;
+    }
+
+    // Compute homography
+    Matrix3d G = homographyFromPoints(matches);
+
+    // Convert to Euclidean homography
+    Matrix3d H = euclideanHomography(K, G);
+
+    // Decompose H into 4 possible solutions R, t, n
+    vector<Matrix3d, aligned_allocator<Matrix3d> > Rs;
+    vector<Vector3d, aligned_allocator<Vector3d> > ns, ts;
+    decomposeEuclideanHomography(H, Rs, ts, ns);
+
+    // Eliminate impossible solutions
+    eliminateInvalidSolutions(matches, K, Rs, ts, ns);
+
+    // Check that true solution is in the resulting solution set
+    bool solution_obtained = false;
+    Matrix3d R = (q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c).R();
+    Vector3d t = q_cb2c.rotp(x2.q().rotp((x2.p() - x1.p()) / x1.p()(0)));
+    Vector3d n = q_cb2c.rotp(x1.q().rotp(common::e1));
+    for (int i = 0; i < Rs.size(); ++i)
+    {
+      if ((R - Rs[i]).norm() < error_tol && (t - ts[i]).norm() < error_tol && (n - ns[i]).norm() < error_tol)
+      {
+        solution_obtained = true;
+        break;
+      }
+    }
+
+    // Show debug output if solution is not obtained
+    if (!solution_obtained)
+    {
+      ++num_bad_iters;
+      cout << "\n\nTrue solution not found!\n\n";
+      cout << "Number of matches: " << matches.size() << "\n\n";
+      Vector3d p2_prime = G * matches[0].p1.vec3();
+      p2_prime /= p2_prime(2);
+      cout << "point  = " << matches[0].p2.vec3().transpose() << endl;
+      cout << "point' = " << p2_prime.transpose() << endl;
+
+      // Compute homography from camera geometry
+      cout << endl;
+      Matrix3d G2 = homographyFromGeometry(K, x1, x2);
+      cout << "G = \n" << G << endl;
+      cout << "G2 = \n" << G2 << endl;
+
+      cout << endl;
+      cout << "H = \n" << H << endl;
+      cout << "H2 = \n" << R + t*n.transpose() << endl;
+
+      for (int i = 0; i < Rs.size(); ++i)
+      {
+        cout << "Solutions:\n\n";
+        cout << "R" << i << " =\n" << Rs[i] << endl;
+        cout << "t" << i << " = " << ts[i].transpose() << endl;
+        cout << "n" << i << " = " << ns[i].transpose() << endl;
+      }
+
+      cout << "Truth: \n\n";
+      cout << "R_true = \n" << R << endl;
+      cout << "t_true = " << t.transpose() << endl;
+      cout << "n_true = " << n.transpose() << endl;
+    }
+  }
+  cout << "\nNumber of bad solutions found: " << num_bad_iters << " out of " << num_iters << " iterations." << "\n\n";
+  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count();
+  cout << "Time taken: " << tf*1e-6 << " seconds" << endl;
+
+  return 0;
 }

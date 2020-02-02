@@ -16,10 +16,7 @@ using namespace std;
 using namespace chrono;
 using namespace Eigen;
 
-static const common::Quaterniond q_cb2c = [] {
-  common::Quaterniond q(M_PI/2, 0, M_PI/2);
-  return q;
-}();
+static const common::Quaterniond q_cb2c = common::Quaterniond::fromEulerZYX(M_PI/2, 0, M_PI/2);
 
 struct Point
 {
@@ -83,13 +80,13 @@ void projectAndMatchImagePoints(const Matrix3d& K, const vector<Point>& pts_I,
   for (const Point& pt_I : pts_I)
   {
     // Transform points into camera frame
-    Vector3d pt_c1 = q_cb2c.rot(x1.transform(pt_I.vec3()));
-    Vector3d pt_c2 = q_cb2c.rot(x2.transform(pt_I.vec3()));
+    Vector3d pt_c1 = q_cb2c.rotp(x1.transformp(pt_I.vec3()));
+    Vector3d pt_c2 = q_cb2c.rotp(x2.transformp(pt_I.vec3()));
 
     // Project points into image
     Vector2d pt_img1, pt_img2;
-    common::projToImg(pt_img1, pt_c1, K);
-    common::projToImg(pt_img2, pt_c2, K);
+    common::projectToImage(pt_img1, pt_c1, K);
+    common::projectToImage(pt_img2, pt_c2, K);
     pt_img1 += pix_noise_bound*Vector2d::Random();
     pt_img2 += pix_noise_bound*Vector2d::Random();
 
@@ -188,11 +185,11 @@ void refineHaLM(common::Quaterniond& q,
       {
         Vector3d nua = matches[j].p1.vec3();
         Vector3d nub = matches[j].p2.vec3();
-        Vector3d nub_hat = K*q.rot(K_inv*nua);
+        Vector3d nub_hat = K*q.rotp(K_inv*nua);
         Vector3d err = nub - nub_hat/nub_hat(2);
         cost(j) = 0.5*err.dot(err);
 
-        Matrix3d dnub_hat_dq = -K*common::skew(q.rot(K_inv*nua));
+        Matrix3d dnub_hat_dq = -K*common::skew(q.rotp(K_inv*nua));
         J.row(j) = err.transpose()*((Matrix3d::Identity() - nub_hat*common::e3.transpose()/nub_hat(2))/nub_hat(2)*dnub_hat_dq);
       }
       H = J.transpose()*J;
@@ -208,7 +205,7 @@ void refineHaLM(common::Quaterniond& q,
     {
       Vector3d nua = matches[j].p1.vec3();
       Vector3d nub = matches[j].p2.vec3();
-      Vector3d nub_hat = K*q_new.rot(K_inv*nua);
+      Vector3d nub_hat = K*q_new.rotp(K_inv*nua);
       Vector3d err = nub - nub_hat/common::e3.dot(nub_hat);
       cost_new(j) = 0.5*err.dot(err);
     }
@@ -286,7 +283,7 @@ common::Quaterniond rotationFromPointsHaRANSAC(const Matrix3d& K, const vector<M
       Point p2 = matches_shuffled.back().p2;
 
       // Check eprojection error
-      Vector2d pixel_diff = (p2.vec3() - K*q.rot(K_inv*p1.vec3())).topRows<2>();
+      Vector2d pixel_diff = (p2.vec3() - K*q.rotp(K_inv*p1.vec3())).topRows<2>();
       if (pixel_diff.norm() < RANSAC_thresh)
       {
         // cout << endl;
@@ -409,9 +406,9 @@ Vector3d derivativeOfMinEigenvalueOfM(const common::Quaterniond& q,
     C = pow((Delta1 - root2)/2.0, 1.0/3.0);
 
   // Derivatives
-  Matrix3d dr1_dq = -common::skew(q.rot(common::e1));
-  Matrix3d dr2_dq = -common::skew(q.rot(common::e2));
-  Matrix3d dr3_dq = -common::skew(q.rot(common::e3));
+  Matrix3d dr1_dq = -common::skew(q.rotp(common::e1));
+  Matrix3d dr2_dq = -common::skew(q.rotp(common::e2));
+  Matrix3d dr3_dq = -common::skew(q.rotp(common::e3));
 
   RowVector3d dm11_dv = 2.0*((r2.transpose()*Az - r3.transpose()*Ayz)*dr2_dq + (r3.transpose()*Ay - r2.transpose()*Ayz)*dr3_dq);
   RowVector3d dm22_dv = 2.0*((r1.transpose()*Az - r3.transpose()*Axz)*dr1_dq + (r3.transpose()*Ax - r1.transpose()*Axz)*dr3_dq);
@@ -502,7 +499,7 @@ void kneipLM(common::Quaterniond& q,
     if (delta.norm() < exit_tol) break;
 
     // Try restarting at random value if rotation > some threshold
-    double rot_from_q0 = common::Quaterniond::log(q.inv() * q0).norm();
+    double rot_from_q0 = common::Quaterniond::log(q.inverse() * q0).norm();
     if (rot_from_q0 > restart_variation)
       q = q0 + restart_variation * Vector3d::Random();
   }
@@ -691,7 +688,8 @@ void sampsonLM(common::Quaterniond& q, Vector3d& et,
   double lambda = lambda0;
   Matrix3d K_inv = K.inverse();
 
-  common::Quaterniond q_new, qt(et), qt_new;
+  common::Quaterniond q_new, qt_new;
+  common::Quaterniond qt = common::Quaterniond::fromUnitVector(et);
   Matrix<double,1,5> dS;
   Matrix<double,5,1> b, delta;
   Matrix<double,5,5> H, H_diag, A;
@@ -720,7 +718,7 @@ void sampsonLM(common::Quaterniond& q, Vector3d& et,
 
     // Compute cost with new parameters
     q_new = q + delta.head<3>();
-    qt_new = common::Quaterniond::boxplus_uvec(qt, delta.tail<2>());
+    qt_new = common::Quaterniond::boxPlusUnitVector(qt, delta.tail<2>());
     for (int j = 0; j < N; ++j)
       cost_new(j) = sampson(K, matches[j].p1.vec3(), matches[j].p2.vec3(), q_new, qt_new);
     if (cost_new.dot(cost_new) < cost.dot(cost))
@@ -756,7 +754,7 @@ void rotationFromPointsHaSampson(const Matrix3d& K, const vector<Match>& matches
   // Initial guess of translation
   et.setZero();
   for (const auto& match : matches)
-    et += (K_inv*match.p2.vec3() - q.rot(K_inv*match.p1.vec3())).normalized();
+    et += (K_inv*match.p2.vec3() - q.rotp(K_inv*match.p1.vec3())).normalized();
   et = (et/(matches.size()-1)).normalized();
 
   // Refine using Sampson error
@@ -847,10 +845,10 @@ int main(int argc, char* argv[])
     double p2_y = rot_err*M_PI/180.0*dist(rng);
 
     common::Transformd x1, x2;
-    x1.setP(Vector3d(p1_n, p1_e, p1_d));
-    x2.setP(Vector3d(p2_n, p2_e, p2_d));
-    x1.setQ(common::Quaterniond(p1_r, p1_p, p1_y));
-    x2.setQ(common::Quaterniond(p2_r, p2_p, p2_y));
+    x1.p(Vector3d(p1_n, p1_e, p1_d));
+    x2.p(Vector3d(p2_n, p2_e, p2_d));
+    x1.q(common::Quaterniond::fromEulerZYX(p1_r, p1_p, p1_y));
+    x2.q(common::Quaterniond::fromEulerZYX(p2_r, p2_p, p2_y));
 
     // Planar points (NED)
     // - N x N grid within +-bound in east and down directions
@@ -866,8 +864,8 @@ int main(int argc, char* argv[])
     }
 
     // Compute true rotation and translation
-    common::Quaterniond q = q_cb2c.inv() * x1.q().inv() * x2.q() * q_cb2c;
-    Vector3d t = q_cb2c.rot(x2.q().rot(x1.p() - x2.p()));
+    common::Quaterniond q = q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c;
+    Vector3d t = q_cb2c.rotp(x2.q().rotp(x1.p() - x2.p()));
 
     // Run estimator
     common::Quaterniond q_hat;
@@ -901,7 +899,7 @@ int main(int argc, char* argv[])
  
     // Compute error in relative pose
     double rot_error = Vector3d(q - q_hat).norm();
-    double tran_error = common::angDiffBetweenVecs(t, et_hat);
+    double tran_error = common::angleBetweenVectors(t, et_hat);
 
     // Reprojection error ignoring translation
     Matrix3d K_inv = K.inverse();
@@ -911,8 +909,8 @@ int main(int argc, char* argv[])
     {
       if (matches[i].p1.id > 999999) continue;
       Vector3d k1 = K_inv*matches[i].p1.vec3();
-      Vector3d reproj_no_tran_true = K*q.rot(k1); reproj_no_tran_true /= reproj_no_tran_true(2);
-      Vector3d reproj_no_tran_hat = K*q_hat.rot(k1); reproj_no_tran_hat /= reproj_no_tran_hat(2);
+      Vector3d reproj_no_tran_true = K*q.rotp(k1); reproj_no_tran_true /= reproj_no_tran_true(2);
+      Vector3d reproj_no_tran_hat = K*q_hat.rotp(k1); reproj_no_tran_hat /= reproj_no_tran_hat(2);
       reproj_errs.push_back((reproj_no_tran_true - reproj_no_tran_hat).norm());
     }
     double reproj_error = accumulate(reproj_errs.begin(), reproj_errs.end(), 0.0)/reproj_errs.size();
