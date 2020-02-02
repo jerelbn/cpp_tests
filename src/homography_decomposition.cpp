@@ -16,7 +16,7 @@ using namespace std;
 using namespace chrono;
 using namespace Eigen;
 
-static const common::Quaterniond q_cb2c = common::Quaterniond::fromEulerZYX(M_PI/2, 0, M_PI/2);
+static const common::Quaterniond q_cb2c = common::Quaterniond::fromEuler123(M_PI/2, 0, M_PI/2);
 
 struct Point
 {
@@ -402,8 +402,8 @@ int main(int argc, char* argv[])
     common::Transformd x1, x2;
     x1.p(Vector3d(p1_n, p1_e, p1_d));
     x2.p(Vector3d(p2_n, p2_e, p2_d));
-    x1.q(common::Quaterniond::fromEulerZYX(p1_r, p1_p, p1_y));
-    x2.q(common::Quaterniond::fromEulerZYX(p2_r, p2_p, p2_y));
+    x1.q(common::Quaterniond::fromEuler123(p1_r, p1_p, p1_y));
+    x2.q(common::Quaterniond::fromEuler123(p2_r, p2_p, p2_y));
 
     // Planar points (NED)
     // - N x N grid within +-bound in east and down directions
