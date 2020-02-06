@@ -12,6 +12,8 @@ Homography decomposition testing
 #include "common_cpp/quaternion.h"
 #include "common_cpp/transform.h"
 
+#define CLOSE_TO_ZERO 0.00001
+
 using namespace std;
 using namespace chrono;
 using namespace Eigen;
@@ -163,10 +165,17 @@ Matrix3d homographyFromGeometry(const Matrix3d& K, const common::Transformd& x1,
 
 
 // Computes the Euclidean Homography such that H = R + n*t^T (eq. 3 of Mails paper)
-Matrix3d euclideanHomography(const Matrix3d& K, const Matrix3d& G)
+bool euclideanHomography(Matrix3d& H, const Matrix3d& K, const Matrix3d& G)
 {
   Matrix3d H_hat = K.inverse() * G * K;
   Matrix3d M = H_hat.transpose() * H_hat;
+
+  // Return false for pure rotation case
+  if (abs(M(0,0) - M(1,1)) < CLOSE_TO_ZERO && abs(M(0,0) - M(2,2)) < CLOSE_TO_ZERO)
+  {
+    H = H_hat/M.diagonal().mean();
+    return true;
+  }
   
   double m11 = M(0,0);
   double m22 = M(1,1);
@@ -182,7 +191,9 @@ Matrix3d euclideanHomography(const Matrix3d& K, const Matrix3d& G)
   vector<double> reals, imags;
   common::solveCubic(1.0, b, c, d, reals, imags);
 
-  return H_hat / sqrt(reals[1]);
+  H = H_hat / sqrt(reals[1]);
+
+  return false;
 }
 
 
@@ -196,19 +207,13 @@ void decomposeEuclideanHomography(const Matrix3d& H,
   // - compile determinants of opposite minors
   // - null close to zero values
   Matrix3d S = H.transpose() * H - common::I_3x3;
-  double s11 = S(0,0);
-  double s12 = S(0,1);
-  double s13 = S(0,2);
-  double s22 = S(1,1);
-  double s23 = S(1,2);
-  double s33 = S(2,2);
 
-  s11 = abs(s11) < 1e-6 ? 0 : s11;
-  s12 = abs(s12) < 1e-6 ? 0 : s12;
-  s13 = abs(s13) < 1e-6 ? 0 : s13;
-  s22 = abs(s22) < 1e-6 ? 0 : s22;
-  s23 = abs(s23) < 1e-6 ? 0 : s23;
-  s33 = abs(s33) < 1e-6 ? 0 : s33;
+  double s11 = abs(S(0,0)) < CLOSE_TO_ZERO ? 0 : S(0,0);
+  double s12 = abs(S(0,1)) < CLOSE_TO_ZERO ? 0 : S(0,1);
+  double s13 = abs(S(0,2)) < CLOSE_TO_ZERO ? 0 : S(0,2);
+  double s22 = abs(S(1,1)) < CLOSE_TO_ZERO ? 0 : S(1,1);
+  double s23 = abs(S(1,2)) < CLOSE_TO_ZERO ? 0 : S(1,2);
+  double s33 = abs(S(2,2)) < CLOSE_TO_ZERO ? 0 : S(2,2);
 
   double M_s11 = s23*s23 - s22*s33;
   double M_s22 = s13*s13 - s11*s33;
@@ -217,12 +222,12 @@ void decomposeEuclideanHomography(const Matrix3d& H,
   double M_s13 = s13*s22 - s12*s23;
   double M_s23 = s12*s13 - s11*s23;
 
-  M_s11 = abs(M_s11) < 1e-6 ? 0 : M_s11;
-  M_s22 = abs(M_s22) < 1e-6 ? 0 : M_s22;
-  M_s33 = abs(M_s33) < 1e-6 ? 0 : M_s33;
-  M_s12 = abs(M_s12) < 1e-6 ? 0 : M_s12;
-  M_s13 = abs(M_s13) < 1e-6 ? 0 : M_s13;
-  M_s23 = abs(M_s23) < 1e-6 ? 0 : M_s23;
+  M_s11 = abs(M_s11) < CLOSE_TO_ZERO ? 0 : M_s11;
+  M_s22 = abs(M_s22) < CLOSE_TO_ZERO ? 0 : M_s22;
+  M_s33 = abs(M_s33) < CLOSE_TO_ZERO ? 0 : M_s33;
+  M_s12 = abs(M_s12) < CLOSE_TO_ZERO ? 0 : M_s12;
+  M_s13 = abs(M_s13) < CLOSE_TO_ZERO ? 0 : M_s13;
+  M_s23 = abs(M_s23) < CLOSE_TO_ZERO ? 0 : M_s23;
 
   // Compute some common parameters
   double nu = 2.0 * sqrt(1.0 + S.trace() - M_s11 - M_s22 - M_s33);
@@ -338,6 +343,33 @@ void eliminateInvalidSolutions(const vector<Match>& matches, const Matrix3d& K,
 }
 
 
+// Decompose Homography computed from points and eliminate impossible solutions
+void decomposeHomography(vector<Matrix3d, aligned_allocator<Matrix3d> >& Rs,
+                         vector<Vector3d, aligned_allocator<Vector3d> >& ts,
+                         vector<Vector3d, aligned_allocator<Vector3d> >& ns,
+                         const Matrix3d& G, const Matrix3d& K, const vector<Match>& matches)
+{
+    // Convert to Euclidean homography
+    Matrix3d H;
+    bool pure_rotation = euclideanHomography(H, K, G);
+
+    // For pure rotation, t is zero, n is undefined and R = H
+    if (pure_rotation)
+    {
+      Rs.push_back(H);
+      ts.push_back(Vector3d::Zero());
+      ns.push_back(Vector3d::Constant(NAN));
+      return;
+    }
+
+    // Decompose H into 4 possible solutions R, t, n
+    decomposeEuclideanHomography(H, Rs, ts, ns);
+
+    // Eliminate impossible solutions
+    eliminateInvalidSolutions(matches, K, Rs, ts, ns);
+}
+
+
 
 
 /*================================= MAIN =================================*/
@@ -346,7 +378,7 @@ int main(int argc, char* argv[])
 {
   // Random parameters
   auto t0 = high_resolution_clock::now();
-  size_t seed = 0;//time(0);
+  size_t seed = time(0);
   default_random_engine rng(seed);
   uniform_real_distribution<double> dist(-1.0, 1.0);
   srand(seed);
@@ -367,7 +399,7 @@ int main(int argc, char* argv[])
 
   double zI_offset = 150;
   const unsigned N = 51; // number of points along single grid line
-  const double pix_noise_bound = 1.0; // pixels
+  const double pix_noise_bound = 0.5; // pixels
   const double trans_err = 5.0;
   const double rot_err = 5.0; // degrees
   const double matched_pts_inlier_ratio = 1.0;
@@ -375,9 +407,17 @@ int main(int argc, char* argv[])
 
   size_t num_iters = 1000;
   size_t num_bad_iters = 0;
-  double error_tol = 0.1;
+  double error_tol = 0.78;
 
-
+  double dt_calc_mean = 0.0; // seconds
+  double dt_calc_var = 0.0; // seconds
+  double rot_error_mean = 0.0;
+  double tran_error_mean = 0.0;
+  double rot_error_var = 0.0;
+  double tran_error_var = 0.0;
+  double match_pts_mean = 0.0;
+  double match_pts_var = 0.0;
+  size_t n_stats = 0;
   for (size_t iter = 0; iter < num_iters; ++iter)
   {
     cout << "Iteration: " << iter+1 << " out of " << num_iters << "\r" << flush;
@@ -412,35 +452,36 @@ int main(int argc, char* argv[])
     // Project matching points into each camera image
     vector<Match> matches;
     projectAndMatchImagePoints(K, pts_I, x1, x2, pix_noise_bound, matched_pts_inlier_ratio, matches);
-    if (matches.size() < 8)
+    if (matches.size() < 24)
     {
       --iter; // Try that iteration again
       continue;
     }
 
-    // Compute homography
-    Matrix3d G = homographyFromPoints(matches);
-
-    // Convert to Euclidean homography
-    Matrix3d H = euclideanHomography(K, G);
-
-    // Decompose H into 4 possible solutions R, t, n
+    // Compute homography and decompose it
+    auto t_calc_0 = high_resolution_clock::now();
     vector<Matrix3d, aligned_allocator<Matrix3d> > Rs;
     vector<Vector3d, aligned_allocator<Vector3d> > ns, ts;
-    decomposeEuclideanHomography(H, Rs, ts, ns);
+    Matrix3d G = homographyFromPoints(matches);
+    decomposeHomography(Rs, ts, ns, G, K, matches);
+    double dt_calc = duration_cast<microseconds>(high_resolution_clock::now() - t_calc_0).count()*1e-6;
 
-    // Eliminate impossible solutions
-    eliminateInvalidSolutions(matches, K, Rs, ts, ns);
-
-    // Check that true solution is in the resulting solution set
-    bool solution_obtained = false;
+    // Truth
     Matrix3d R = (q_cb2c.inverse() * x1.q().inverse() * x2.q() * q_cb2c).R();
     Vector3d t = q_cb2c.rotp(x2.q().rotp((x2.p() - x1.p()) / x1.p()(0)));
     Vector3d n = q_cb2c.rotp(x1.q().rotp(common::e1));
+
+    // Error
+    double rot_error, tran_error;
+    bool solution_obtained = false;
     for (int i = 0; i < Rs.size(); ++i)
     {
-      if ((R - Rs[i]).norm() < error_tol && (t - ts[i]).norm() < error_tol && (n - ns[i]).norm() < error_tol)
+      if (common::logR(Matrix3d(R.transpose()*Rs[i])).norm() < error_tol ||
+          common::angleBetweenVectors(t, ts[i]) < error_tol || 
+          common::angleBetweenVectors(n, ns[i]) < error_tol)
       {
+        rot_error = common::logR(Matrix3d(R.transpose()*Rs[i])).norm();
+        tran_error = common::angleBetweenVectors(t, ts[i]);
         solution_obtained = true;
         break;
       }
@@ -450,40 +491,78 @@ int main(int argc, char* argv[])
     if (!solution_obtained)
     {
       ++num_bad_iters;
-      cout << "\n\nTrue solution not found!\n\n";
+      cout << "\n\n\n\n";
+      cout << "True solution not found!\n\n";
       cout << "Number of matches: " << matches.size() << "\n\n";
+
+      cout << endl;
+      cout << "Errors:\n";
+      for (int i = 0; i < Rs.size(); ++i)
+      {
+        cout << endl;
+        cout << "R" << i << "_err = " << common::logR(Matrix3d(R.transpose()*Rs[i])).norm() << endl;
+        cout << "t" << i << "_err = " << common::angleBetweenVectors(t, ts[i]) << endl;
+        cout << "n" << i << "_err = " << common::angleBetweenVectors(n, ns[i]) << endl;
+      }
+
+
       Vector3d p2_prime = G * matches[0].p1.vec3();
       p2_prime /= p2_prime(2);
+      cout << endl;
       cout << "point  = " << matches[0].p2.vec3().transpose() << endl;
       cout << "point' = " << p2_prime.transpose() << endl;
 
       // Compute homography from camera geometry
       cout << endl;
-      Matrix3d G2 = homographyFromGeometry(K, x1, x2);
       cout << "G = \n" << G << endl;
-      cout << "G2 = \n" << G2 << endl;
+      cout << "G_from_geometry = \n" << homographyFromGeometry(K, x1, x2) << endl;
 
       cout << endl;
+      Matrix3d H;
+      euclideanHomography(H, K, G);
       cout << "H = \n" << H << endl;
-      cout << "H2 = \n" << R + t*n.transpose() << endl;
+      cout << "H_from_geometry = \n" << R + t*n.transpose() << endl;
 
+      cout << endl;
+      cout << "Solutions:\n";
       for (int i = 0; i < Rs.size(); ++i)
       {
-        cout << "Solutions:\n\n";
+        cout << endl;
         cout << "R" << i << " =\n" << Rs[i] << endl;
         cout << "t" << i << " = " << ts[i].transpose() << endl;
         cout << "n" << i << " = " << ns[i].transpose() << endl;
       }
 
+      cout << endl;
       cout << "Truth: \n\n";
       cout << "R_true = \n" << R << endl;
       cout << "t_true = " << t.transpose() << endl;
       cout << "n_true = " << n.transpose() << endl;
     }
+
+    // Recursive error and variance of things
+    dt_calc_mean = (n_stats*dt_calc_mean + dt_calc)/(n_stats+1);
+    match_pts_mean = (n_stats*match_pts_mean + matches.size())/(n_stats+1);
+    rot_error_mean = (n_stats*rot_error_mean + rot_error)/(n_stats+1);
+    tran_error_mean = (n_stats*tran_error_mean + tran_error)/(n_stats+1);
+    if (n_stats > 0)
+    {
+      dt_calc_var = ((n_stats-1)*dt_calc_var + pow(dt_calc - dt_calc_mean, 2.0))/n_stats;
+      match_pts_var = ((n_stats-1)*match_pts_var + pow(matches.size() - match_pts_mean, 2.0))/n_stats;
+      rot_error_var = ((n_stats-1)*rot_error_var + pow(rot_error - rot_error_mean, 2.0))/n_stats;
+      tran_error_var = ((n_stats-1)*tran_error_var + pow(tran_error - tran_error_mean, 2.0))/n_stats;
+    }
+    ++n_stats;
   }
-  cout << "\nNumber of bad solutions found: " << num_bad_iters << " out of " << num_iters << " iterations." << "\n\n";
-  auto tf = chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - t0).count();
-  cout << "Time taken: " << tf*1e-6 << " seconds" << endl;
+  auto tf = duration_cast<microseconds>(high_resolution_clock::now() - t0).count()*1e-6;
+  cout << "\n\n";
+  cout << "                Total time taken: " << tf << " seconds\n";
+  cout << "                 Error tolerance: " << error_tol*180/M_PI << " degrees\n";
+  cout << "        Number of bad iterations: " << num_bad_iters << " out of " << num_iters << endl;
+  cout << "         Calc time (mean, stdev): (" << dt_calc_mean << ", " << sqrt(dt_calc_var) << ") seconds\n";
+  cout << "         match_pts (mean, stdev): (" << match_pts_mean << ", " << sqrt(match_pts_var) << ")\n";
+  cout << "         Rot error (mean, stdev): (" << rot_error_mean*180/M_PI << ", " << sqrt(rot_error_var)*180/M_PI << ") degrees\n";
+  cout << "        Tran error (mean, stdev): (" << tran_error_mean*180/M_PI << ", " << sqrt(tran_error_var)*180/M_PI << ") degrees\n";
 
   return 0;
 }
