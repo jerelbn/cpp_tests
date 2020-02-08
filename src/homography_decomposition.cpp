@@ -108,6 +108,14 @@ bool euclideanHomography(Matrix3d& H, const Matrix3d& K, const Matrix3d& G)
 {
   Matrix3d H_hat = K.inverse() * G * K;
   Matrix3d M = H_hat.transpose() * H_hat;
+
+  // Return false for pure rotation case
+  // NOTE: This cannot happen on real images due to image noise
+  if (abs(M(0,0) - M(1,1)) > 1.0 || abs(M(0,0) - M(2,2)) > 1.0)
+  {
+    H = H_hat; // Do something else here
+    return true;
+  }
   
   double m11 = M(0,0);
   double m22 = M(1,1);
