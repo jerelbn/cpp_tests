@@ -24,15 +24,13 @@ include_directories(include
   # ${CERES_INCLUDE_DIRS}
   )
 
-add_executable(homography_decomposition
-  src/homography_decomposition.cpp
-  )
-target_link_libraries(homography_decomposition
-  ${YAML_CPP_LIBRARIES}
-  )
-
 add_executable(rotation_from_two_images
   src/rotation_from_two_images.cpp
+  src/util.cpp
+  src/rotation_linear.cpp
+  src/rotation_kneip.cpp
+  src/rotation_sampson.cpp
+  src/homography_decomposition.cpp
   )
 target_link_libraries(rotation_from_two_images
   ${YAML_CPP_LIBRARIES}
