@@ -41,7 +41,7 @@ int main(int argc, char* argv[])
   // - 3: Kneip solver w/ RANSAC
   // - 4: Sampson
   // - 5: Homography decomposition
-  int solver = 4;
+  int solver = 5;
 
   double zI_offset = 1000;
   const unsigned N = 31; // number of points along single grid line
