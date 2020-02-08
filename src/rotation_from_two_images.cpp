@@ -1,10 +1,6 @@
 /*
 
 Rotation From Two Images - calculate only the rotation matrix from matched points in two images
-- this uses NED and camera coordinates
-- A Closed-Form Solution to Rotation Estimation for Structure from Small Motion - Ha, Oh, Kweon
-- Direct Optimization of Frame-to-Frame Rotation - Kneip, Lynen
-- NOTE: This solution degrades as the ratio of camera translation to average feature depth increases!
 
 */
 #include "util.h"
@@ -45,7 +41,7 @@ int main(int argc, char* argv[])
   // - 3: Kneip solver w/ RANSAC
   // - 4: Sampson
   // - 5: Homography decomposition
-  int solver = 5;
+  int solver = 4;
 
   double zI_offset = 1000;
   const unsigned N = 31; // number of points along single grid line
@@ -57,8 +53,8 @@ int main(int argc, char* argv[])
 
   size_t num_iters = 1000;
   size_t num_bad_iters = 0;
-  double R_error_tol = 5.0*M_PI/180;
-  double t_error_tol = 45*M_PI/180;
+  double R_error_tol = 30.0*M_PI/180;
+  double t_error_tol = 180*M_PI/180;
 
 
   double dt_calc_mean = 0.0; // seconds

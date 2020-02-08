@@ -378,18 +378,10 @@ void rotationFromPointsSampson(common::Quaterniond& q, common::Quaterniond& qt,
   // sampsonLMT(qt, q, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
   // sampsonLM(q, qt, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
 
-  cout << "\n1q =  " << q.toEigen().transpose() << endl;
-  cout << "1et = " << qt.uvec().transpose() << endl;
-  sampsonLM(q, qt, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
-  cout << "\n2q =  " << q.toEigen().transpose() << endl;
-  cout << "2et = " << qt.uvec().transpose() << endl;
-  estimateTranslationDirectionKnownRotation(qt, q, match_dirs);
-  cout << "\n3q =  " << q.toEigen().transpose() << endl;
-  cout << "3et = " << qt.uvec().transpose() << endl;
-  sampsonLMT(qt, q, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
-  cout << "\n4q =  " << q.toEigen().transpose() << endl;
-  cout << "4et = " << qt.uvec().transpose() << endl;
-  sampsonLM(q, qt, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
-  cout << "\n5q =  " << q.toEigen().transpose() << endl;
-  cout << "5et = " << qt.uvec().transpose() << endl;
+  for (int i = 0; i < max_iters; ++i)
+  {
+    sampsonLM(q, qt, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
+    estimateTranslationDirectionKnownRotation(qt, q, match_dirs);
+    sampsonLMT(qt, q, match_dirs, max_iters, exit_tol, lambda0, lambda_adjust);
+  }
 }
