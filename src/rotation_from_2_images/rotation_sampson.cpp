@@ -1,4 +1,4 @@
-#include "rotation_sampson.h"
+#include "rotation_from_2_images/rotation_sampson.h"
 
 
 void sampson(double& S,

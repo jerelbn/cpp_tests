@@ -6,7 +6,7 @@ Rotation From Two Images - calculate only the rotation matrix from matched point
 */
 #pragma once
 
-#include "util.h"
+#include "rotation_from_2_images/util.h"
 
 
 void matrixMconstants(Matrix3d& Ax,  Matrix3d& Ay,  Matrix3d& Az,

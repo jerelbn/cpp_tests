@@ -8,7 +8,7 @@ Homography decomposition testing
 */
 #pragma once
 
-#include "util.h"
+#include "rotation_from_2_images/util.h"
 
 
 void homographyFromPoints(Matrix3d& G, const vector<Match>& matches);

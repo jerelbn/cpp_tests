@@ -25,12 +25,12 @@ include_directories(include
   )
 
 add_executable(rotation_from_two_images
-  src/rotation_from_two_images.cpp
-  src/util.cpp
-  src/rotation_linear.cpp
-  src/rotation_kneip.cpp
-  src/rotation_sampson.cpp
-  src/homography_decomposition.cpp
+  src/rotation_from_2_images/rotation_from_two_images.cpp
+  src/rotation_from_2_images/util.cpp
+  src/rotation_from_2_images/rotation_linear.cpp
+  src/rotation_from_2_images/rotation_kneip.cpp
+  src/rotation_from_2_images/rotation_sampson.cpp
+  src/rotation_from_2_images/homography_decomposition.cpp
   )
 target_link_libraries(rotation_from_two_images
   ${YAML_CPP_LIBRARIES}

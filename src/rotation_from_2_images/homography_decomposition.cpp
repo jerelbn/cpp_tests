@@ -1,4 +1,4 @@
-#include "homography_decomposition.h"
+#include "rotation_from_2_images/homography_decomposition.h"
 
 
 void homographyFromPoints(Matrix3d& G, const vector<Match>& matches)

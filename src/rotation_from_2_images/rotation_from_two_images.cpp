@@ -3,11 +3,11 @@
 Rotation From Two Images - calculate only the rotation matrix from matched points in two images
 
 */
-#include "util.h"
-#include "rotation_linear.h"
-#include "rotation_kneip.h"
-#include "rotation_sampson.h"
-#include "homography_decomposition.h"
+#include "rotation_from_2_images/util.h"
+#include "rotation_from_2_images/rotation_linear.h"
+#include "rotation_from_2_images/rotation_kneip.h"
+#include "rotation_from_2_images/rotation_sampson.h"
+#include "rotation_from_2_images/homography_decomposition.h"
 
 
 

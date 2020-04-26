@@ -1,4 +1,4 @@
-#include "rotation_linear.h"
+#include "rotation_from_2_images/rotation_linear.h"
 
 
 void linearSolutionHa(common::Quaterniond& q, const Matrix3d& K, const vector<Match>& matches)
