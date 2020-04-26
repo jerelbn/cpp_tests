@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.10)
 project(cpp_tests)
 
 # default to release build
@@ -34,4 +34,8 @@ add_executable(rotation_from_two_images
   )
 target_link_libraries(rotation_from_two_images
   ${YAML_CPP_LIBRARIES}
+  )
+
+add_executable(memory_manipulation
+  src/memory_manipulation/main.cpp
   )
