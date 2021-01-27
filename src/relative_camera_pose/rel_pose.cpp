@@ -28,25 +28,6 @@ vector<Point> predictPointLocs(const vector<Point>& pts, const Matrix3f& K, cons
 }
 
 
-vector<Point> predictPointLocsMeanDepth(const vector<Point>& pts, const Matrix3f& K, const Matrix3f& K_inv,
-                                        const common::Quaternionf& q, const Vector3f& t, float depth)
-{
-    vector<Point> new_pts = pts;
-    for (int i = 0; i < new_pts.size(); ++i) {
-        Vector3f pt_h(pts[i].x, pts[i].y, 1.0);
-        Vector3f pt_c = depth * (K_inv * pt_h).normalized();
-        Vector3f new_pt_c = q.rotp(pt_c) + t;
-        Vector3f new_pt_h = K*new_pt_c;
-        new_pt_h /= new_pt_h(2);
-        new_pts[i].x = new_pt_h(0);
-        new_pts[i].y = new_pt_h(1);
-        new_pts[i].depth = new_pt_c.norm();
-    }
-
-    return new_pts;
-}
-
-
 template<int N>
 Matrix<float,N,1> computeRadioErrorAll(const vector<Point> &pts2_hat, const vector<Point> &pts2) {
     Matrix<float,N,1> err;
