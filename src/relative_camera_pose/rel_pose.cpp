@@ -87,6 +87,69 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 }
 
 
+template<int N>
+int solveQTD(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
+             vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
+    int ii;
+    const int M = 6 + N;
+    const Matrix3f I = eps*Matrix3f::Identity();
+    for (ii = 0; ii < iters; ++ii) {
+        // Compute Jacobian of error w.r.t. rotation and translation
+        Matrix<float,N,M> J;
+        for (int i = 0; i < 3; ++i)
+        {
+            common::Quaternionf qp = q_hat +  I.col(i);
+            common::Quaternionf qm = q_hat + -I.col(i);
+            vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, qp, t_hat);
+            vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, qm, t_hat);
+            Matrix<float,N,1> errp = computeRadioErrorAll<N>(pts2p , pts2);
+            Matrix<float,N,1> errm = computeRadioErrorAll<N>(pts2m , pts2);
+            J.col(i) = (errp - errm)/(2.0*eps);
+        }
+        for (int i = 0; i < 3; ++i)
+        {
+            Vector3f tp = t_hat +  I.col(i);
+            Vector3f tm = t_hat + -I.col(i);
+            vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, q_hat, tp);
+            vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, q_hat, tm);
+            Matrix<float,N,1> errp = computeRadioErrorAll<N>(pts2p , pts2);
+            Matrix<float,N,1> errm = computeRadioErrorAll<N>(pts2m , pts2);
+            J.col(i+3) = (errp - errm)/(2.0*eps);
+        }
+        for (int i = 0; i < N; ++i)
+        {
+            vector<Point> pts1p = pts1;
+            vector<Point> pts1m = pts1;
+            pts1p[i].depth +=  eps;
+            pts1m[i].depth += -eps;
+            vector<Point> pts2p = predictPointLocs(pts1p, K, K_inv, q_hat, t_hat);
+            vector<Point> pts2m = predictPointLocs(pts1m, K, K_inv, q_hat, t_hat);
+            Matrix<float,N,1> errp = computeRadioErrorAll<N>(pts2p , pts2);
+            Matrix<float,N,1> errm = computeRadioErrorAll<N>(pts2m , pts2);
+            J.col(i+6) = (errp - errm)/(2.0*eps);
+        }
+
+        // Computer current error
+        vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
+        Matrix<float,N,1> err = computeRadioErrorAll<N>(pts2_hat, pts2);
+
+        // Update R/t estimates
+        Matrix<float,M,1> delta = J.bdcSvd(ComputeThinU | ComputeThinV).solve(err);
+        q_hat += -delta.template segment<3>(0);
+        t_hat += -delta.template segment<3>(3);
+        for (int i = 0; i < N; ++i) {
+            if (pts1[i].depth > delta(i+6))
+                pts1[i].depth += -delta(i+6);
+        }
+
+        if (delta.norm() < 1e-6)
+            break;
+    }
+
+    return ii;
+}
+
+
 int main(int argc, char* argv[])
 {
     // General parameters
@@ -157,7 +220,7 @@ int main(int argc, char* argv[])
     for (int i = 0; i < Np; ++i) {
         pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx;
         pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy;
-        pts1[i].depth = lms1.col(i).norm();
+        pts1[i].depth = 1.0;//lms1.col(i).norm();
         pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx;
         pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy;
         pts2[i].depth = lms2.col(i).norm();
@@ -166,7 +229,8 @@ int main(int argc, char* argv[])
     // Solve for relative camera rotation and translation via Gauss Newton optimization
     common::Quaternionf q_hat;
     Vector3f t_hat = Vector3f::Zero();
-    int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+    // int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+    int num_iters = solveQTD<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
     
     // Print results
     cout << "num iters: " << num_iters << endl;
