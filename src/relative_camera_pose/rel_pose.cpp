@@ -9,34 +9,44 @@ struct Point
 };
 
 
+Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix3f& K_inv,
+                      const common::Quaternionf& q, const Vector3f& t)
+{
+    Point new_pt = pt;
+    Vector3f pt_h(pt.x, pt.y, 1.0);
+    Vector3f pt_c = pt.depth * (K_inv * pt_h).normalized();
+    Vector3f new_pt_c = q.rotp(pt_c) + t;
+    Vector3f new_pt_h = K*new_pt_c;
+    new_pt_h /= new_pt_h(2);
+    new_pt.x = new_pt_h(0);
+    new_pt.y = new_pt_h(1);
+    new_pt.depth = new_pt_c.norm();
+    return new_pt;
+}
+
+
 vector<Point> predictPointLocs(const vector<Point>& pts, const Matrix3f& K, const Matrix3f& K_inv,
                                const common::Quaternionf& q, const Vector3f& t)
 {
     vector<Point> new_pts = pts;
-    for (int i = 0; i < new_pts.size(); ++i) {
-        Vector3f pt_h(pts[i].x, pts[i].y, 1.0);
-        Vector3f pt_c = pts[i].depth * (K_inv * pt_h).normalized();
-        Vector3f new_pt_c = q.rotp(pt_c) + t;
-        Vector3f new_pt_h = K*new_pt_c;
-        new_pt_h /= new_pt_h(2);
-        new_pts[i].x = new_pt_h(0);
-        new_pts[i].y = new_pt_h(1);
-        new_pts[i].depth = new_pt_c.norm();
-    }
-
+    for (int i = 0; i < new_pts.size(); ++i)
+        new_pts[i] = predictPointLoc(pts[i], K, K_inv, q, t);
     return new_pts;
+}
+
+
+float computeError(const Point &pt_hat, const Point &pt) {
+    float dx = pt.x - pt_hat.x;
+    float dy = pt.y - pt_hat.y;
+    return dx * dx + dy * dy;
 }
 
 
 template<int N>
 Matrix<float,N,1> computeErrors(const vector<Point> &pts2_hat, const vector<Point> &pts2) {
     Matrix<float,N,1> err;
-    for (int i = 0; i < N; ++i) {
-        float dx = pts2[i].x - pts2_hat[i].x;
-        float dy = pts2[i].y - pts2_hat[i].y;
-        err(i) = dx * dx + dy * dy;
-    }
-
+    for (int i = 0; i < N; ++i)
+        err(i) = computeError(pts2_hat[i], pts2[i]);
     return err;
 }
 
@@ -79,6 +89,80 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
         q_hat += -delta.segment<3>(0);
         t_hat += -delta.segment<3>(3);
 
+        if (delta.norm() < 1e-6)
+            break;
+    }
+
+    return ii;
+}
+
+
+template<int N>
+int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
+             const vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
+    int ii;
+    const Matrix3f I = eps*Matrix3f::Identity();
+    for (ii = 0; ii < iters; ++ii) {
+        // Compute radiometric error of each predicted point
+        vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
+        Matrix<float,N,1> err = computeErrors<N>(pts2_hat, pts2);
+
+        // Compute Jacobian of error w.r.t. rotation and translation
+        Matrix<float,N,6> J;
+        for (int i = 0; i < N; ++i)
+        {
+            // Shift predicted pixel by one in each direction
+            Point ptxp = pts2_hat[i];
+            ptxp.x += 1;
+            Point ptxm = pts2_hat[i];
+            ptxm.x -= 1;
+            Point ptyp = pts2_hat[i];
+            ptyp.y += 1;
+            Point ptym = pts2_hat[i];
+            ptym.y -= 1;
+            
+            // Compute radiometric values at shifted locations
+            float errxp = computeError(ptxp, pts2[i]);
+            float errxm = computeError(ptxm, pts2[i]);
+            float erryp = computeError(ptyp, pts2[i]);
+            float errym = computeError(ptym, pts2[i]);
+
+            // Numerical derivatives of error w.r.t. pixel location
+            Eigen::Matrix<float,1,2> derr_dp;
+            derr_dp(0) = (errxp - errxm) / (ptxp.x - ptxm.x);
+            derr_dp(1) = (erryp - errym) / (ptyp.y - ptym.y);
+
+            // Numerical derivative of pixel location w.r.t. rotation and translation
+            Eigen::Matrix<float,2,6> dp_dqt;
+            for (int j = 0; j < 3; ++j)
+            {
+                // Rotation
+                common::Quaternionf qp = q_hat +  I.col(j);
+                common::Quaternionf qm = q_hat + -I.col(j);
+                Point ptqp = predictPointLoc(pts1[i], K, K_inv, qp, t_hat);
+                Point ptqm = predictPointLoc(pts1[i], K, K_inv, qm, t_hat);
+                dp_dqt(0,j) = (ptqp.x - ptqm.x)/(2.0*eps);
+                dp_dqt(1,j) = (ptqp.y - ptqm.y)/(2.0*eps);
+
+                // Translation
+                Eigen::Vector3f tp = t_hat +  I.col(j);
+                Eigen::Vector3f tm = t_hat + -I.col(j);
+                Point pttp = predictPointLoc(pts1[i], K, K_inv, q_hat, tp);
+                Point pttm = predictPointLoc(pts1[i], K, K_inv, q_hat, tm);
+                dp_dqt(0,j+3) = (pttp.x - pttm.x)/(2.0*eps);
+                dp_dqt(1,j+3) = (pttp.y - pttm.y)/(2.0*eps);
+            }
+
+            // Chain rule the previous derivatives to form a row of the Jacobian
+            J.row(i) = derr_dp * dp_dqt;
+        }
+
+        // Update R/t estimates
+        Eigen::Matrix<float,6,1> delta = J.completeOrthogonalDecomposition().solve(err);
+        q_hat += -delta.segment<3>(0);
+        t_hat += -delta.segment<3>(3);
+
+        // The solution has converged when it stops changing
         if (delta.norm() < 1e-6)
             break;
     }
@@ -166,7 +250,8 @@ int main(int argc, char* argv[])
     // Solve for relative camera rotation and translation via Gauss Newton optimization
     common::Quaternionf q_hat;
     Vector3f t_hat = Vector3f::Zero();
-    int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+    // int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+    int num_iters = solveQT2<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
     
     // Print results
     cout << "num iters: " << num_iters << endl;
