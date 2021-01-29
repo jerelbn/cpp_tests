@@ -128,37 +128,49 @@ int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
             float errym = computeError(ptym, pts2[i]);
 
             // Numerical derivatives of error w.r.t. pixel location
-            Eigen::Matrix<float,1,2> derr_dp;
+            Matrix<float,1,2> derr_dp;
             derr_dp(0) = (errxp - errxm) / (ptxp.x - ptxm.x);
             derr_dp(1) = (erryp - errym) / (ptyp.y - ptym.y);
 
-            // Numerical derivative of pixel location w.r.t. rotation and translation
-            Eigen::Matrix<float,2,6> dp_dqt;
-            for (int j = 0; j < 3; ++j)
-            {
-                // Rotation
-                common::Quaternionf qp = q_hat +  I.col(j);
-                common::Quaternionf qm = q_hat + -I.col(j);
-                Point ptqp = predictPointLoc(pts1[i], K, K_inv, qp, t_hat);
-                Point ptqm = predictPointLoc(pts1[i], K, K_inv, qm, t_hat);
-                dp_dqt(0,j) = (ptqp.x - ptqm.x)/(2.0*eps);
-                dp_dqt(1,j) = (ptqp.y - ptqm.y)/(2.0*eps);
+            // // Numerical derivative of pixel location w.r.t. rotation and translation
+            // Matrix<float,2,6> dp_dqt;
+            // for (int j = 0; j < 3; ++j)
+            // {
+            //     // Rotation
+            //     common::Quaternionf qp = q_hat +  I.col(j);
+            //     common::Quaternionf qm = q_hat + -I.col(j);
+            //     Point ptqp = predictPointLoc(pts1[i], K, K_inv, qp, t_hat);
+            //     Point ptqm = predictPointLoc(pts1[i], K, K_inv, qm, t_hat);
+            //     dp_dqt(0,j) = (ptqp.x - ptqm.x)/(2.0*eps);
+            //     dp_dqt(1,j) = (ptqp.y - ptqm.y)/(2.0*eps);
 
-                // Translation
-                Eigen::Vector3f tp = t_hat +  I.col(j);
-                Eigen::Vector3f tm = t_hat + -I.col(j);
-                Point pttp = predictPointLoc(pts1[i], K, K_inv, q_hat, tp);
-                Point pttm = predictPointLoc(pts1[i], K, K_inv, q_hat, tm);
-                dp_dqt(0,j+3) = (pttp.x - pttm.x)/(2.0*eps);
-                dp_dqt(1,j+3) = (pttp.y - pttm.y)/(2.0*eps);
-            }
+            //     // Translation
+            //     Vector3f tp = t_hat +  I.col(j);
+            //     Vector3f tm = t_hat + -I.col(j);
+            //     Point pttp = predictPointLoc(pts1[i], K, K_inv, q_hat, tp);
+            //     Point pttm = predictPointLoc(pts1[i], K, K_inv, q_hat, tm);
+            //     dp_dqt(0,j+3) = (pttp.x - pttm.x)/(2.0*eps);
+            //     dp_dqt(1,j+3) = (pttp.y - pttm.y)/(2.0*eps);
+            // }
+
+            // Analytical derivative of pixel location w.r.t. rotation and translation
+            Matrix<float,2,6> dp_dqt;
+            static const Vector3f e3(0,0,1);
+            static const Matrix3f I3 = Matrix3f::Identity();
+            Vector3f pt1_c = pts1[i].depth * (K_inv * Vector3f(pts1[i].x, pts1[i].y, 1.0)).normalized();
+            Vector3f pt2_c = q_hat.rotp(pt1_c) + t_hat;
+            float z = (K * pt2_c)(2);
+            float zi = 1.0/z;
+            Matrix<float,2,3> M = (zi*(I3 - zi*K*pt2_c*e3.transpose())*K).topRows(2);
+            dp_dqt.block<2,3>(0,0) = M*common::skew(q_hat.rotp(pt1_c));
+            dp_dqt.block<2,3>(0,3) = M;
 
             // Chain rule the previous derivatives to form a row of the Jacobian
             J.row(i) = derr_dp * dp_dqt;
         }
 
         // Update R/t estimates
-        Eigen::Matrix<float,6,1> delta = J.completeOrthogonalDecomposition().solve(err);
+        Matrix<float,6,1> delta = J.completeOrthogonalDecomposition().solve(err);
         q_hat += -delta.segment<3>(0);
         t_hat += -delta.segment<3>(3);
 
