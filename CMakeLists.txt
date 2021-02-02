@@ -46,3 +46,10 @@ add_executable(rel_pose
 target_link_libraries(rel_pose
   ${YAML_CPP_LIBRARIES}
   )
+
+add_executable(triangulation
+  src/triangulation/triangulation.cpp
+  )
+target_link_libraries(triangulation
+  ${YAML_CPP_LIBRARIES}
+  )
