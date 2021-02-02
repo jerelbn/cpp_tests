@@ -42,7 +42,6 @@ add_executable(memory_manipulation
 
 add_executable(rel_pose
   src/relative_camera_pose/rel_pose.cpp
-  src/relative_camera_pose/util.cpp
   )
 target_link_libraries(rel_pose
   ${YAML_CPP_LIBRARIES}

@@ -1,5 +1,10 @@
 // Testing relative pose computations
-#include <relative_camera_pose/util.hpp>
+#include <iostream>
+#include <Eigen/Dense>
+#include <common_cpp/quaternion.h>
+
+using namespace std;
+using namespace Eigen;
 
 struct Point
 {
