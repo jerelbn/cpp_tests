@@ -29,6 +29,8 @@ void triangulatePoint(Point& pt1, Point& pt2, const Matrix3f& K_inv,
     Vector2f zs = A.householderQr().solve(t);
     pt1.z = zs(1);
     pt2.z = zs(0);
+    float theta = acos(b.normalized().dot(q.rotp(a).normalized()));
+    cout << "theta: " << theta*180/M_PI << endl;
 }
 
 
