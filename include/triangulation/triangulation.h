@@ -1,6 +1,8 @@
 // Triangulation test
+#pragma once
+
 #include <iostream>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 #include <common_cpp/quaternion.h>
 
 using namespace std;
