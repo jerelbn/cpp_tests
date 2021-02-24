@@ -53,3 +53,10 @@ add_executable(triangulation
 target_link_libraries(triangulation
   ${YAML_CPP_LIBRARIES}
   )
+
+add_executable(cam_imu_cal_init
+  src/cam_imu_cal_init/cam_imu_cal_init.cpp
+  )
+target_link_libraries(cam_imu_cal_init
+  ${YAML_CPP_LIBRARIES}
+  )
