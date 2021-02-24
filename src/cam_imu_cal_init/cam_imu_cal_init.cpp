@@ -13,7 +13,8 @@ int main(int argc, char* argv[])
     // Truth parameters
     size_t seed = time(0);
     srand(seed);
-    const common::Quaternionf q_bc = common::Quaternionf::fromEuler(0.1,0.2,0.3);
+    const Vector3f eulers = M_PI/2*Vector3f::Random();
+    const common::Quaternionf q_bc = common::Quaternionf::fromEuler(eulers(0), eulers(1), eulers(2));
     const uint32_t true_delay = rand() % max_delay;
 
     // Fill measurement containers
