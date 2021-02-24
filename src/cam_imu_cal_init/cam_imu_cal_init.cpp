@@ -7,13 +7,13 @@ int main(int argc, char* argv[])
     const int cam_rate = 25;     // Camera update rate (Hz)
     const int imu_rate = 250;    // IMU update rate (Hz)
     const uint32_t t0_ms = 1000;    // Initial time stamp (ms)
-    const uint32_t tf_ms = 2000; // Final time stamp (ms)
+    const uint32_t tf_ms = 3000; // Final time stamp (ms)
     const int max_delay = 200;   // Maximum possible time delay (ms)
 
     // Truth parameters
     size_t seed = time(0);
     srand(seed);
-    const common::Quaternionf q_bc = common::Quaternionf::fromEuler(0,0,0);
+    const common::Quaternionf q_bc = common::Quaternionf::fromEuler(0.1,0.2,0.3);
     const uint32_t true_delay = rand() % max_delay;
 
     // Fill measurement containers
@@ -41,7 +41,6 @@ int main(int argc, char* argv[])
         img.t_ms -= delay;
 
     // Estimate camera to IMU rotation
-    // NOTE: not working right now, come back later if it matters
     common::Quaternionf q_bc_hat = estimateCamToImuRotation(images, imus);
 
     cout << "delay_est = " << delay << " ms" << endl;

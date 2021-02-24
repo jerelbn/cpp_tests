@@ -148,20 +148,19 @@ common::Quaternionf estimateCamToImuRotation(const vector<Image> &images, const 
     }
 
     // Integrate gyro measurements between images
-    common::Quaternionf q;
     vector<common::Quaternionf> q_gyros;
     auto imu_it = imus.begin();
     for (int i = 1; i < images.size(); ++i) {
+        common::Quaternionf q;
         while (imu_it->t_ms < images[i].t_ms) {
-            float t0 = imu_it->t_ms;
-            float t1 = (imu_it+1)->t_ms; 
+            float t0 = imu_it->t_ms/1000.0;
+            float t1 = (imu_it+1)->t_ms/1000.0; 
             Vector3f w0 = imu_it->gyro;
             Vector3f w1 = (imu_it+1)->gyro;
             q += (t1 - t0) * (w0 + w1) / 2;
             ++imu_it;
         }
         q_gyros.push_back(q);
-        q.setIdentity();
     }
 
     // Build matrices from rotation axes
@@ -172,17 +171,6 @@ common::Quaternionf estimateCamToImuRotation(const vector<Image> &images, const 
         C.col(i) = common::Quaternionf::log(q_cams[i]).normalized();
     }
     Matrix3f M = C * B.transpose();
-
-    cout << "B = \n" << B << endl;
-    cout << "C = \n" << C << endl;
-
-    cout << "q_gyros = \n";
-    for (const auto &q : q_gyros)
-        cout << q.toEigen().transpose() << endl;
-
-    cout << "q_cams = \n";
-    for (const auto &q : q_cams)
-        cout << q.toEigen().transpose() << endl;
 
     // Compute SVD of M
     BDCSVD<Matrix3f> svd(M, ComputeFullU | ComputeFullV);
