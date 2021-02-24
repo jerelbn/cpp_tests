@@ -137,3 +137,61 @@ uint32_t computeTimeDelay(const vector<Image> &images, vector<Imu> imus, uint32_
 
     return ts[delay] - ts[0];
 }
+
+common::Quaternionf estimateCamToImuRotation(const vector<Image> &images, const vector<Imu> &imus) {
+    // Trim containers
+
+    // Compute relative rotations between images
+    vector<common::Quaternionf> q_cams;
+    for (int i = 1; i < images.size(); ++i) {
+        q_cams.push_back(images[i-1].q.inverse() * images[i].q);
+    }
+
+    // Integrate gyro measurements between images
+    common::Quaternionf q;
+    vector<common::Quaternionf> q_gyros;
+    auto imu_it = imus.begin();
+    for (int i = 1; i < images.size(); ++i) {
+        while (imu_it->t_ms < images[i].t_ms) {
+            float t0 = imu_it->t_ms;
+            float t1 = (imu_it+1)->t_ms; 
+            Vector3f w0 = imu_it->gyro;
+            Vector3f w1 = (imu_it+1)->gyro;
+            q += (t1 - t0) * (w0 + w1) / 2;
+            ++imu_it;
+        }
+        q_gyros.push_back(q);
+        q.setIdentity();
+    }
+
+    // Build matrices from rotation axes
+    MatrixXf B(3,q_gyros.size());
+    MatrixXf C(3,q_cams.size());
+    for (int i = 0; i < q_cams.size(); ++i) {
+        B.col(i) = common::Quaternionf::log(q_gyros[i]).normalized();
+        C.col(i) = common::Quaternionf::log(q_cams[i]).normalized();
+    }
+    Matrix3f M = C * B.transpose();
+
+    cout << "B = \n" << B << endl;
+    cout << "C = \n" << C << endl;
+
+    cout << "q_gyros = \n";
+    for (const auto &q : q_gyros)
+        cout << q.toEigen().transpose() << endl;
+
+    cout << "q_cams = \n";
+    for (const auto &q : q_cams)
+        cout << q.toEigen().transpose() << endl;
+
+    // Compute SVD of M
+    BDCSVD<Matrix3f> svd(M, ComputeFullU | ComputeFullV);
+    Matrix3f U = svd.matrixU();
+    Matrix3f S = svd.singularValues().asDiagonal();
+    Matrix3f V = svd.matrixV();
+
+    // Construct rotation matrix
+    Matrix3f R_bc = U * V.transpose();
+
+    return common::Quaternionf::fromRotationMatrix(R_bc);
+}
