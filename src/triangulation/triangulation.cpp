@@ -12,10 +12,11 @@ int main(int argc, char* argv[])
     uniform_real_distribution<float> dist(-1.0, 1.0);
     srand(seed);
 
-    float t_err = 1.0;
+    float t_err = 5.0;
     float r_err = 5.0*M_PI/180.0;
     float pts_spread = 10.0;
     float pts_offset_z = 30.0;
+    float pixel_err = 1.0;
 
     // Camera intrinsics and distortion
     float img_width = 640;
@@ -67,11 +68,11 @@ int main(int argc, char* argv[])
     // Project landmarks into each camera image
     vector<Point> pts1(Np), pts2(Np);
     for (int i = 0; i < Np; ++i) {
-        pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx + 0.5*randi();
-        pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy + 0.5*randi();
+        pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx + pixel_err*randi();
+        pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy + pixel_err*randi();
         pts1[i].z = lms1(2,i);
-        pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + 0.5*randi();
-        pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + 0.5*randi();
+        pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + pixel_err*randi();
+        pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + pixel_err*randi();
         pts2[i].z = lms2(2,i);
     }
     
@@ -84,10 +85,10 @@ int main(int argc, char* argv[])
         triangulatePoint(pts1_hat[i], pts2_hat[i], K_inv, q, t);
     }
     
-    // Print results
+    // Print percent errors
+    printf("Percent Errors (error/depth):\n");
     for (int i = 0; i < Np; ++i) {
-        printf("pt%d: %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f\n", i, 
-            pts1[i].z, pts1_hat[i].z, pts1[i].z-pts1_hat[i].z, pts2[i].z, pts2_hat[i].z, pts2[i].z-pts2_hat[i].z);
+        printf("pt%d: %10.4f %10.4f\n", i, 100*abs(pts1[i].z-pts1_hat[i].z)/pts1[i].z, 100*abs(pts2[i].z-pts2_hat[i].z)/pts2[i].z);
     }
 
     return 0;

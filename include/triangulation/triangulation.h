@@ -22,6 +22,9 @@ float randi() {
 void triangulatePoint(Point& pt1, Point& pt2, const Matrix3f& K_inv,
                        const common::Quaternionf& q, const Vector3f& t)
 {
+    // Find optimal correspondences (Lindstrom paper)
+    
+    // Get depth
     Vector3f a = K_inv * Vector3f(pt1.x, pt1.y, 1.0);
     Vector3f b = K_inv * Vector3f(pt2.x, pt2.y, 1.0);
     Matrix<float,3,2> A;
