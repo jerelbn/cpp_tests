@@ -19,13 +19,13 @@ Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix3f& K_inv,
 {
     Point new_pt = pt;
     Vector3f pt_h(pt.x, pt.y, 1.0);
-    Vector3f pt_c = pt.depth * (K_inv * pt_h).normalized();
+    Vector3f pt_c = pt.depth * K_inv * pt_h;
     Vector3f new_pt_c = q.rotp(pt_c) + t;
     Vector3f new_pt_h = K*new_pt_c;
     new_pt_h /= new_pt_h(2);
     new_pt.x = new_pt_h(0);
     new_pt.y = new_pt_h(1);
-    new_pt.depth = new_pt_c.norm();
+    new_pt.depth = new_pt_c(2);
     return new_pt;
 }
 
@@ -105,15 +105,20 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 template<int N>
 int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
              const vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
+    // Extra parameters
+    const float weight_factor = 1.0e-6;
+    
     int ii;
     const Matrix3f I = eps*Matrix3f::Identity();
+    Matrix<float,N,6> J;
+    Eigen::VectorXf W(N);
+    W.setOnes();
     for (ii = 0; ii < iters; ++ii) {
         // Compute radiometric error of each predicted point
         vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
         Matrix<float,N,1> err = computeErrors<N>(pts2_hat, pts2);
 
         // Compute Jacobian of error w.r.t. rotation and translation
-        Matrix<float,N,6> J;
         for (int i = 0; i < N; ++i)
         {
             // Shift predicted pixel by one in each direction
@@ -174,14 +179,23 @@ int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
             J.row(i) = derr_dp * dp_dqt;
         }
 
+        // Ensure invertible Hessian, stabilizing the solution
+        Eigen::Matrix<float,6,6> H = J.transpose() * W.asDiagonal() * J;
+        H.diagonal() += 0.001*Eigen::Matrix<float,6,1>::Ones();
+
         // Update R/t estimates
-        Matrix<float,6,1> delta = J.completeOrthogonalDecomposition().solve(err);
+        Eigen::Matrix<float,6,1> delta = H.colPivHouseholderQr().solve(J.transpose()*W.asDiagonal()*err);
         q_hat += -delta.segment<3>(0);
         t_hat += -delta.segment<3>(3);
 
         // The solution has converged when it stops changing
         if (delta.norm() < 1e-6)
             break;
+
+        // Update weights
+        for (int i = 0; i < N; ++i) {
+            W(i) = 1.0 / std::max(weight_factor, std::abs(err(i)));
+        }
     }
 
     return ii;
@@ -191,20 +205,25 @@ int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 int main(int argc, char* argv[])
 {
     // General parameters
-    const int Np = 10; // number of points
-    const int gn_iters = 1000; // maximum number of Gauss Newton iterations
+    const int Nmc = 10000; // Number of Monte Carlo runs
+    const int Np = 100; // number of points
+    const int gn_iters = 50; // maximum number of Gauss Newton iterations
     const float gn_eps = 1e-5; // Nudge for computing derivatives
 
     // Random parameters
-    size_t seed = 0;//time(0);
+    size_t seed = time(0);
     default_random_engine rng(seed);
     uniform_real_distribution<float> dist(-1.0, 1.0);
     srand(seed);
 
     float t_err = 1.0;
     float r_err = 5.0*M_PI/180.0;
-    float pts_spread = 10.0;
-    float pts_offset_z = 30.0;
+    float pts_spread = 20.0;
+    float pts_offset_z = 50.0;
+    float pix_err = 0.5;
+    float depth_err = 0.05; // percent of depth error
+    float zdepth0 = 50.0;
+    int num_unknown_depth = 0.2*Np; // must be <= Np
 
     // Camera intrinsics and distortion
     float img_width = 640;
@@ -231,51 +250,64 @@ int main(int argc, char* argv[])
     D(3) = 0;
     D(4) = 0;
 
-    // Camera poses in camera coordinates (right-down-forward)
-    // - camera 1 is the origin at null attitude
-    Vector3f p1 = Vector3f::Zero();
-    common::Quaternionf q1;
+    vector<int> h_iters;
+    vector<float> h_qerr;
+    vector<float> h_terr;
+    for (int jj = 0; jj < Nmc; ++jj) {
+        // Camera poses in camera coordinates (right-down-forward)
+        // - camera 1 is the origin at null attitude
+        Vector3f p1 = Vector3f::Zero();
+        common::Quaternionf q1;
 
-    Vector3f p2 = t_err*Vector3f::Random();
-    common::Quaternionf q2 = common::Quaternionf::fromAxisAngle(Vector3f::Random().normalized(), r_err*dist(rng));
+        Vector3f p2 = t_err*Vector3f::Random();
+        common::Quaternionf q2 = common::Quaternionf::fromAxisAngle(Vector3f::Random().normalized(), r_err*dist(rng));
 
-    // Relative pose
-    // - rotation 1 to 2
-    // - translation 2 to 1 in 2's reference frame
-    common::Quaternionf q = q1.inverse() * q2;
-    Vector3f t = q2.rotp(p1 - p2);
+        // Relative pose
+        // - rotation 1 to 2
+        // - translation 2 to 1 in 2's reference frame
+        common::Quaternionf q = q1.inverse() * q2;
+        Vector3f t = q2.rotp(p1 - p2);
 
-    // Points in each camera frame
-    Matrix<float,3,Np> lms1 = pts_spread*Matrix<float,3,Np>::Random();
-    lms1.row(2) += pts_offset_z*Matrix<float,1,Np>::Ones();
-    Matrix<float,3,Np> lms2;
-    for (int i = 0; i < Np; ++i) {
-        lms2.col(i) = q2.rotp(p1 - p2 + lms1.col(i));
+        // Points in each camera frame
+        Matrix<float,3,Np> lms1 = pts_spread*Matrix<float,3,Np>::Random();
+        lms1.row(2) += pts_offset_z*Matrix<float,1,Np>::Ones();
+        Matrix<float,3,Np> lms2;
+        for (int i = 0; i < Np; ++i) {
+            lms2.col(i) = q2.rotp(p1 - p2 + lms1.col(i));
+        }
+
+        // Project landmarks into each camera image
+        vector<Point> pts1(Np), pts2(Np);
+        for (int i = 0; i < Np; ++i) {
+            pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx + pix_err*dist(rng);
+            pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy + pix_err*dist(rng);
+            pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + pix_err*dist(rng);
+            pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + pix_err*dist(rng);
+            if (i < num_unknown_depth) {
+                pts1[i].depth = zdepth0;
+                pts2[i].depth = zdepth0;
+            }
+            else {
+                pts1[i].depth = (1.0+depth_err*dist(rng))*lms1(2,i);
+                pts2[i].depth = (1.0+depth_err*dist(rng))*lms2(2,i);
+            }
+        }
+        
+        // Solve for relative camera rotation and translation via Gauss Newton optimization
+        common::Quaternionf q_hat;
+        Vector3f t_hat = Vector3f::Zero();
+        // int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+        int num_iters = solveQT2<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+
+        h_iters.push_back(num_iters);
+        h_qerr.push_back(100*(q - q_hat).norm()/(q2-q1).norm());
+        h_terr.push_back(100*(t - t_hat).norm()/(p2-p1).norm());
     }
-
-    // Project landmarks into each camera image
-    vector<Point> pts1(Np), pts2(Np);
-    for (int i = 0; i < Np; ++i) {
-        pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx;
-        pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy;
-        pts1[i].depth = lms1.col(i).norm();
-        pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx;
-        pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy;
-        pts2[i].depth = lms2.col(i).norm();
-    }
-    
-    // Solve for relative camera rotation and translation via Gauss Newton optimization
-    common::Quaternionf q_hat;
-    Vector3f t_hat = Vector3f::Zero();
-    // int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
-    int num_iters = solveQT2<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
     
     // Print results
-    cout << "num iters: " << num_iters << endl;
-    cout << "q = \n" << q.toEigen() << endl;
-    cout << "q_hat = \n" << q_hat.toEigen() << endl;
-    cout << "t = \n" << t << endl;
-    cout << "t_hat = \n" << t_hat << endl;
+    cout << "num iters: " << std::accumulate(h_iters.begin(), h_iters.end(), 0.)/Nmc << endl;
+    cout << "q_err = %" << std::accumulate(h_qerr.begin(), h_qerr.end(), 0.)/Nmc << endl;
+    cout << "t_err = %" << std::accumulate(h_terr.begin(), h_terr.end(), 0.)/Nmc << endl;
 
     return 0;
 }
