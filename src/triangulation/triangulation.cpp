@@ -70,25 +70,25 @@ int main(int argc, char* argv[])
     for (int i = 0; i < Np; ++i) {
         pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx + pixel_err*randi();
         pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy + pixel_err*randi();
-        pts1[i].z = lms1(2,i);
+        pts1[i].depth = lms1.col(i).norm();
         pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + pixel_err*randi();
         pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + pixel_err*randi();
-        pts2[i].z = lms2(2,i);
+        pts2[i].depth = lms2.col(i).norm();
     }
     
     // Solve for optical depth of each point
     vector<Point> pts1_hat = pts1;
     vector<Point> pts2_hat = pts2;
     for (int i = 0; i < Np; ++i) {
-        pts1_hat[i].z = 0;
-        pts2_hat[i].z = 0;
+        pts1_hat[i].depth = 0;
+        pts2_hat[i].depth = 0;
         triangulatePoint(pts1_hat[i], pts2_hat[i], K_inv, q, t);
     }
     
     // Print percent errors
     printf("Percent Errors (error/depth):\n");
     for (int i = 0; i < Np; ++i) {
-        printf("pt%d: %10.4f %10.4f\n", i, 100*abs(pts1[i].z-pts1_hat[i].z)/pts1[i].z, 100*abs(pts2[i].z-pts2_hat[i].z)/pts2[i].z);
+        printf("pt%d: %10.4f %10.4f\n", i, 100*abs(pts1[i].depth-pts1_hat[i].depth)/pts1[i].depth, 100*abs(pts2[i].depth-pts2_hat[i].depth)/pts2[i].depth);
     }
 
     return 0;
