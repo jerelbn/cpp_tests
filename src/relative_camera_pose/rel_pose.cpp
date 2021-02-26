@@ -19,13 +19,13 @@ Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix3f& K_inv,
 {
     Point new_pt = pt;
     Vector3f pt_h(pt.x, pt.y, 1.0);
-    Vector3f pt_c = pt.depth * K_inv * pt_h;
+    Vector3f pt_c = pt.depth * (K_inv * pt_h).normalized();
     Vector3f new_pt_c = q.rotp(pt_c) + t;
     Vector3f new_pt_h = K*new_pt_c;
     new_pt_h /= new_pt_h(2);
     new_pt.x = new_pt_h(0);
     new_pt.y = new_pt_h(1);
-    new_pt.depth = new_pt_c(2);
+    new_pt.depth = new_pt_c.norm();
     return new_pt;
 }
 
@@ -223,7 +223,7 @@ int main(int argc, char* argv[])
     float pix_err = 0.5;
     float depth_err = 0.05; // percent of depth error
     float zdepth0 = 50.0;
-    int num_unknown_depth = 0.2*Np; // must be <= Np
+    int num_unknown_depth = 1.0*Np; // must be <= Np
 
     // Camera intrinsics and distortion
     float img_width = 640;
@@ -288,8 +288,8 @@ int main(int argc, char* argv[])
                 pts2[i].depth = zdepth0;
             }
             else {
-                pts1[i].depth = (1.0+depth_err*dist(rng))*lms1(2,i);
-                pts2[i].depth = (1.0+depth_err*dist(rng))*lms2(2,i);
+                pts1[i].depth = (1.0+depth_err*dist(rng))*lms1.col(i).norm();
+                pts2[i].depth = (1.0+depth_err*dist(rng))*lms2.col(i).norm();
             }
         }
         
