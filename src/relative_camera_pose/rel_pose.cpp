@@ -59,54 +59,8 @@ Matrix<float,N,1> computeErrors(const vector<Point> &pts2_hat, const vector<Poin
 template<int N>
 int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
             const vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
-    int ii;
-    const Matrix3f I = eps*Matrix3f::Identity();
-    for (ii = 0; ii < iters; ++ii) {
-        // Compute Jacobian of error w.r.t. rotation and translation
-        Matrix<float,N,6> J;
-        for (int i = 0; i < 3; ++i)
-        {
-            common::Quaternionf qp = q_hat +  I.col(i);
-            common::Quaternionf qm = q_hat + -I.col(i);
-            vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, qp, t_hat);
-            vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, qm, t_hat);
-            Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
-            Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
-            J.col(i) = (errp - errm)/(2.0*eps);
-        }
-        for (int i = 0; i < 3; ++i)
-        {
-            Vector3f tp = t_hat +  I.col(i);
-            Vector3f tm = t_hat + -I.col(i);
-            vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, q_hat, tp);
-            vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, q_hat, tm);
-            Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
-            Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
-            J.col(i+3) = (errp - errm)/(2.0*eps);
-        }
-
-        // Computer current error
-        vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
-        Matrix<float,N,1> err = computeErrors<N>(pts2_hat, pts2);
-
-        // Update R/t estimates
-        Matrix<float,6,1> delta = J.completeOrthogonalDecomposition().solve(err);
-        q_hat += -delta.segment<3>(0);
-        t_hat += -delta.segment<3>(3);
-
-        if (delta.norm() < 1e-6)
-            break;
-    }
-
-    return ii;
-}
-
-
-template<int N>
-int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
-             const vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
     // Extra parameters
-    const float weight_factor = 1.0e-6;
+    const float weight_factor = 0.01;
     
     int ii;
     const Matrix3f I = eps*Matrix3f::Identity();
@@ -117,6 +71,29 @@ int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
         // Compute radiometric error of each predicted point
         vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
         Matrix<float,N,1> err = computeErrors<N>(pts2_hat, pts2);
+
+        // // Compute Jacobian of error w.r.t. rotation and translation
+        // Matrix<float,N,6> J;
+        // for (int i = 0; i < 3; ++i)
+        // {
+        //     common::Quaternionf qp = q_hat +  I.col(i);
+        //     common::Quaternionf qm = q_hat + -I.col(i);
+        //     vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, qp, t_hat);
+        //     vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, qm, t_hat);
+        //     Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
+        //     Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
+        //     J.col(i) = (errp - errm)/(2.0*eps);
+        // }
+        // for (int i = 0; i < 3; ++i)
+        // {
+        //     Vector3f tp = t_hat +  I.col(i);
+        //     Vector3f tm = t_hat + -I.col(i);
+        //     vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, q_hat, tp);
+        //     vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, q_hat, tm);
+        //     Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
+        //     Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
+        //     J.col(i+3) = (errp - errm)/(2.0*eps);
+        // }
 
         // Compute Jacobian of error w.r.t. rotation and translation
         for (int i = 0; i < N; ++i)
@@ -181,7 +158,7 @@ int solveQT2(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 
         // Ensure invertible Hessian, stabilizing the solution
         Eigen::Matrix<float,6,6> H = J.transpose() * W.asDiagonal() * J;
-        H.diagonal() += 0.001*Eigen::Matrix<float,6,1>::Ones();
+        H.diagonal() += 0.01*Eigen::Matrix<float,6,1>::Ones();
 
         // Update R/t estimates
         Eigen::Matrix<float,6,1> delta = H.colPivHouseholderQr().solve(J.transpose()*W.asDiagonal()*err);
@@ -223,7 +200,7 @@ int main(int argc, char* argv[])
     float pix_err = 0.5;
     float depth_err = 0.05; // percent of depth error
     float zdepth0 = 50.0;
-    int num_unknown_depth = 1.0*Np; // must be <= Np
+    int num_unknown_depth = 0.5*Np; // must be <= Np
 
     // Camera intrinsics and distortion
     float img_width = 640;
@@ -252,7 +229,8 @@ int main(int argc, char* argv[])
 
     vector<int> h_iters;
     vector<float> h_qerr;
-    vector<float> h_terr;
+    vector<float> h_tderr;
+    vector<float> h_tmerr;
     for (int jj = 0; jj < Nmc; ++jj) {
         // Camera poses in camera coordinates (right-down-forward)
         // - camera 1 is the origin at null attitude
@@ -296,18 +274,19 @@ int main(int argc, char* argv[])
         // Solve for relative camera rotation and translation via Gauss Newton optimization
         common::Quaternionf q_hat;
         Vector3f t_hat = Vector3f::Zero();
-        // int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
-        int num_iters = solveQT2<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+        int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
 
         h_iters.push_back(num_iters);
-        h_qerr.push_back(100*(q - q_hat).norm()/(q2-q1).norm());
-        h_terr.push_back(100*(t - t_hat).norm()/(p2-p1).norm());
+        h_qerr.push_back((q - q_hat).norm()*180/M_PI);
+        h_tderr.push_back(acos(t.normalized().dot(t_hat.normalized()))*180/M_PI);
+        h_tmerr.push_back((t - t_hat).norm());
     }
     
     // Print results
     cout << "num iters: " << std::accumulate(h_iters.begin(), h_iters.end(), 0.)/Nmc << endl;
-    cout << "q_err = %" << std::accumulate(h_qerr.begin(), h_qerr.end(), 0.)/Nmc << endl;
-    cout << "t_err = %" << std::accumulate(h_terr.begin(), h_terr.end(), 0.)/Nmc << endl;
+    cout << "q_err = " << std::accumulate(h_qerr.begin(), h_qerr.end(), 0.)/Nmc << " degrees" << endl;
+    cout << "t_dir_err = " << std::accumulate(h_tderr.begin(), h_tderr.end(), 0.)/Nmc << " degrees" << endl;
+    cout << "t_mag_err = " << std::accumulate(h_tmerr.begin(), h_tmerr.end(), 0.)/Nmc << " meters" << endl;
 
     return 0;
 }
