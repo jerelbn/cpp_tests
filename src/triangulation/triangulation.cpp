@@ -88,7 +88,9 @@ int main(int argc, char* argv[])
     // Print percent errors
     printf("Percent Errors (error/depth):\n");
     for (int i = 0; i < Np; ++i) {
-        printf("pt%d: %10.4f %10.4f\n", i, 100*abs(pts1[i].depth-pts1_hat[i].depth)/pts1[i].depth, 100*abs(pts2[i].depth-pts2_hat[i].depth)/pts2[i].depth);
+        printf("pt%d: %10.4f %10.4f\n", i, 
+            100*abs(pts1[i].depth-pts1_hat[i].depth)/pts1[i].depth, 
+            100*abs(pts2[i].depth-pts2_hat[i].depth)/pts2[i].depth);
     }
 
     return 0;
