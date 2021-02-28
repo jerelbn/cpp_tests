@@ -13,13 +13,59 @@ struct Point
     float depth; // Distance to the Point
 };
 
-void triangulatePoint(Point& pt1, Point& pt2, const Matrix3f& K_inv,
+Point getUndistortedNormalizedPoint(const Point& pt, const Matrix3f& K, const Matrix<float,5,1>& D)
+{
+    // Unpack intrinsic parameters
+    float fx = K(0,0);
+    float fy = K(1,1);
+    float cx = K(0,2);
+    float cy = K(1,2);
+
+    // Unpack distortion parameters
+    float k1 = D(0);
+    float k2 = D(1);
+    float p1 = D(2);
+    float p2 = D(3);
+    float k3 = D(4);
+
+    // Iterative solve for undistorted normalizd coordinates
+    float xd = (pt.x - cx)/fx;
+    float yd = (pt.y - cy)/fy;
+    float x = xd;
+    float y = yd;
+    float x_prev = 1e9;
+    float y_prev = 1e9;
+    float r2;
+    int iters = 0;
+    const float tol = 1e-6;
+    const int max_iters = 100;
+    while (abs(x - x_prev) > tol && abs(y - y_prev) > tol && iters < max_iters)
+    {
+        x_prev = x;
+        y_prev = y;
+        r2 = x * x + y * y;
+        x = (xd - 2.0 * p1 * x * y - p2 * (r2 + 2.0 * x * x)) / (1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2);
+        y = (yd - p1 * (r2 + 2.0 * y * y) - 2.0 * p2 * x * y) / (1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2);
+        iters++;
+    }
+
+    if (iters == max_iters)
+        float a = 1;
+
+    return Point{x, y, pt.depth};
+}
+
+void triangulatePoint(Point& pt1, Point& pt2, const Matrix3f& K, const Matrix<float,5,1>& D,
                       const common::Quaternionf& q, const Vector3f& t)
 {
+    // Undistort each point
+    Point ptu1 = getUndistortedNormalizedPoint(pt1, K, D);
+    Point ptu2 = getUndistortedNormalizedPoint(pt2, K, D);
+
     // Find optimal correspondences (Lindstrom paper)
     static const Eigen::Matrix<float,2,3> S = (Eigen::Matrix<float,2,3>() << 1, 0, 0, 0, 1, 0).finished();
-    Vector3f x1 = K_inv * Vector3f(pt1.x, pt1.y, 1);
-    Vector3f x2 = K_inv * Vector3f(pt2.x, pt2.y, 1);
+    Vector3f x1(ptu1.x, ptu1.y, 1.0);
+    Vector3f x2(ptu2.x, ptu2.y, 1.0);
     Matrix3f E = common::skew(q.rota(-t)) * q.inverse().R();
     Matrix2f E_tilde = S * E * S.transpose();
     Vector2f n1 = S * E * x2;
@@ -56,9 +102,9 @@ Point projectToImage(const Vector3f& lm, const Matrix3f& K, const Matrix<float,5
     // Unpack distortion parameters
     float k1 = D(0);
     float k2 = D(1);
-    float k3 = D(2);
-    float p1 = D(3);
-    float p2 = D(4);
+    float p1 = D(2);
+    float p2 = D(3);
+    float k3 = D(4);
 
     // Get normalized coordinates
     float x = lm(0) / lm(2);
@@ -73,32 +119,54 @@ Point projectToImage(const Vector3f& lm, const Matrix3f& K, const Matrix<float,5
     Point pt;
     pt.x = fx * xd + cx;
     pt.y = fy * yd + cy;
+    pt.depth = lm.norm();
 
     return pt;
 }
 
-Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix3f& K_inv,
+Vector3f projectFromImage(const Point& pt, const Matrix3f& K, const Matrix<float,5,1>& D)
+{
+    // Compute undisorted point in normalized coordinates
+    Point ptu = getUndistortedNormalizedPoint(pt, K, D);
+
+    return pt.depth * Vector3f(ptu.x, ptu.y, 1.0).normalized();
+}
+
+Point undistortPoint(const Point& pt, const Matrix3f& K, const Matrix<float,5,1>& D)
+{
+    // Unpack intrinsic parameters
+    float fx = K(0,0);
+    float fy = K(1,1);
+    float cx = K(0,2);
+    float cy = K(1,2);
+
+    // Compute undisorted point in normalized coordinates
+    Point ptn = getUndistortedNormalizedPoint(pt, K, D);
+
+    // Build undistorted point
+    Point ptu;
+    ptu.x = fx*ptn.x + cx;
+    ptu.y = fy*ptn.y + cy;
+    ptu.depth = pt.depth;
+
+    return ptu;
+}
+
+Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix<float,5,1>& D,
                       const common::Quaternionf& q, const Vector3f& t)
 {
-    Point new_pt = pt;
-    Vector3f pt_h(pt.x, pt.y, 1.0);
-    Vector3f pt_c = pt.depth * (K_inv * pt_h).normalized();
-    Vector3f new_pt_c = q.rotp(pt_c) + t;
-    Vector3f new_pt_h = K*new_pt_c;
-    new_pt_h /= new_pt_h(2);
-    new_pt.x = new_pt_h(0);
-    new_pt.y = new_pt_h(1);
-    new_pt.depth = new_pt_c.norm();
-    return new_pt;
+    Vector3f lm1 = projectFromImage(pt, K, D);
+    Vector3f lm2 = q.rotp(lm1) + t;
+    return projectToImage(lm2, K, D);
 }
 
 
-vector<Point> predictPointLocs(const vector<Point>& pts, const Matrix3f& K, const Matrix3f& K_inv,
+vector<Point> predictPointLocs(const vector<Point>& pts, const Matrix3f& K, const Matrix<float,5,1>& D,
                                const common::Quaternionf& q, const Vector3f& t)
 {
     vector<Point> new_pts = pts;
     for (int i = 0; i < new_pts.size(); ++i)
-        new_pts[i] = predictPointLoc(pts[i], K, K_inv, q, t);
+        new_pts[i] = predictPointLoc(pts[i], K, D, q, t);
     return new_pts;
 }
 
@@ -120,7 +188,7 @@ Matrix<float,N,1> computeErrors(const vector<Point> &pts2_hat, const vector<Poin
 
 
 template<int N>
-int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv, 
+int solveQT(int iters, float eps, const Matrix3f &K, const Matrix<float,5,1>& D, 
             const vector<Point> &pts1, const vector<Point> &pts2, common::Quaternionf &q_hat, Vector3f &t_hat) {
     // Extra parameters
     const float weight_factor = 0.01;
@@ -132,92 +200,95 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
     W.setOnes();
     for (ii = 0; ii < iters; ++ii) {
         // Compute radiometric error of each predicted point
-        vector<Point> pts2_hat = predictPointLocs(pts1, K, K_inv, q_hat, t_hat);
+        vector<Point> pts2_hat = predictPointLocs(pts1, K, D, q_hat, t_hat);
         Matrix<float,N,1> err = computeErrors<N>(pts2_hat, pts2);
 
-        // // Compute Jacobian of error w.r.t. rotation and translation
-        // Matrix<float,N,6> J;
-        // for (int i = 0; i < 3; ++i)
-        // {
-        //     common::Quaternionf qp = q_hat +  I.col(i);
-        //     common::Quaternionf qm = q_hat + -I.col(i);
-        //     vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, qp, t_hat);
-        //     vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, qm, t_hat);
-        //     Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
-        //     Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
-        //     J.col(i) = (errp - errm)/(2.0*eps);
-        // }
-        // for (int i = 0; i < 3; ++i)
-        // {
-        //     Vector3f tp = t_hat +  I.col(i);
-        //     Vector3f tm = t_hat + -I.col(i);
-        //     vector<Point> pts2p = predictPointLocs(pts1, K, K_inv, q_hat, tp);
-        //     vector<Point> pts2m = predictPointLocs(pts1, K, K_inv, q_hat, tm);
-        //     Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
-        //     Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
-        //     J.col(i+3) = (errp - errm)/(2.0*eps);
-        // }
-
         // Compute Jacobian of error w.r.t. rotation and translation
-        for (int i = 0; i < N; ++i)
+        Matrix<float,N,6> J;
+        for (int i = 0; i < 3; ++i)
         {
-            // Shift predicted pixel by one in each direction
-            Point ptxp = pts2_hat[i];
-            ptxp.x += 1;
-            Point ptxm = pts2_hat[i];
-            ptxm.x -= 1;
-            Point ptyp = pts2_hat[i];
-            ptyp.y += 1;
-            Point ptym = pts2_hat[i];
-            ptym.y -= 1;
-            
-            // Compute radiometric values at shifted locations
-            float errxp = computeError(ptxp, pts2[i]);
-            float errxm = computeError(ptxm, pts2[i]);
-            float erryp = computeError(ptyp, pts2[i]);
-            float errym = computeError(ptym, pts2[i]);
-
-            // Numerical derivatives of error w.r.t. pixel location
-            Matrix<float,1,2> derr_dp;
-            derr_dp(0) = (errxp - errxm) / (ptxp.x - ptxm.x);
-            derr_dp(1) = (erryp - errym) / (ptyp.y - ptym.y);
-
-            // // Numerical derivative of pixel location w.r.t. rotation and translation
-            // Matrix<float,2,6> dp_dqt;
-            // for (int j = 0; j < 3; ++j)
-            // {
-            //     // Rotation
-            //     common::Quaternionf qp = q_hat +  I.col(j);
-            //     common::Quaternionf qm = q_hat + -I.col(j);
-            //     Point ptqp = predictPointLoc(pts1[i], K, K_inv, qp, t_hat);
-            //     Point ptqm = predictPointLoc(pts1[i], K, K_inv, qm, t_hat);
-            //     dp_dqt(0,j) = (ptqp.x - ptqm.x)/(2.0*eps);
-            //     dp_dqt(1,j) = (ptqp.y - ptqm.y)/(2.0*eps);
-
-            //     // Translation
-            //     Vector3f tp = t_hat +  I.col(j);
-            //     Vector3f tm = t_hat + -I.col(j);
-            //     Point pttp = predictPointLoc(pts1[i], K, K_inv, q_hat, tp);
-            //     Point pttm = predictPointLoc(pts1[i], K, K_inv, q_hat, tm);
-            //     dp_dqt(0,j+3) = (pttp.x - pttm.x)/(2.0*eps);
-            //     dp_dqt(1,j+3) = (pttp.y - pttm.y)/(2.0*eps);
-            // }
-
-            // Analytical derivative of pixel location w.r.t. rotation and translation
-            Matrix<float,2,6> dp_dqt;
-            static const Vector3f e3(0,0,1);
-            static const Matrix3f I3 = Matrix3f::Identity();
-            Vector3f pt1_c = pts1[i].depth * (K_inv * Vector3f(pts1[i].x, pts1[i].y, 1.0)).normalized();
-            Vector3f pt2_c = q_hat.rotp(pt1_c) + t_hat;
-            float z = (K * pt2_c)(2);
-            float zi = 1.0/z;
-            Matrix<float,2,3> M = (zi*K*(I3 - zi*pt2_c*e3.transpose())).topRows(2);
-            dp_dqt.block<2,3>(0,0) = M*common::skew(q_hat.rotp(pt1_c));
-            dp_dqt.block<2,3>(0,3) = M;
-
-            // Chain rule the previous derivatives to form a row of the Jacobian
-            J.row(i) = derr_dp * dp_dqt;
+            common::Quaternionf qp = q_hat +  I.col(i);
+            common::Quaternionf qm = q_hat + -I.col(i);
+            vector<Point> pts2p = predictPointLocs(pts1, K, D, qp, t_hat);
+            vector<Point> pts2m = predictPointLocs(pts1, K, D, qm, t_hat);
+            Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
+            Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
+            J.col(i) = (errp - errm)/(2.0*eps);
         }
+        for (int i = 0; i < 3; ++i)
+        {
+            Vector3f tp = t_hat +  I.col(i);
+            Vector3f tm = t_hat + -I.col(i);
+            vector<Point> pts2p = predictPointLocs(pts1, K, D, q_hat, tp);
+            vector<Point> pts2m = predictPointLocs(pts1, K, D, q_hat, tm);
+            Matrix<float,N,1> errp = computeErrors<N>(pts2p , pts2);
+            Matrix<float,N,1> errm = computeErrors<N>(pts2m , pts2);
+            J.col(i+3) = (errp - errm)/(2.0*eps);
+        }
+
+        // // Compute Jacobian of error w.r.t. rotation and translation
+        // for (int i = 0; i < N; ++i)
+        // {
+        //     // Shift predicted pixel by one in each direction
+        //     Point ptxp = pts2_hat[i];
+        //     ptxp.x += 1;
+        //     Point ptxm = pts2_hat[i];
+        //     ptxm.x -= 1;
+        //     Point ptyp = pts2_hat[i];
+        //     ptyp.y += 1;
+        //     Point ptym = pts2_hat[i];
+        //     ptym.y -= 1;
+            
+        //     // Compute radiometric values at shifted locations
+        //     float errxp = computeError(ptxp, pts2[i]);
+        //     float errxm = computeError(ptxm, pts2[i]);
+        //     float erryp = computeError(ptyp, pts2[i]);
+        //     float errym = computeError(ptym, pts2[i]);
+
+        //     // Numerical derivatives of error w.r.t. pixel location
+        //     Matrix<float,1,2> derr_dp;
+        //     derr_dp(0) = (errxp - errxm) / (ptxp.x - ptxm.x);
+        //     derr_dp(1) = (erryp - errym) / (ptyp.y - ptym.y);
+
+        //     // Numerical derivative of pixel location w.r.t. rotation and translation
+        //     Matrix<float,2,6> dp_dqt;
+        //     for (int j = 0; j < 3; ++j)
+        //     {
+        //         // Rotation
+        //         common::Quaternionf qp = q_hat +  I.col(j);
+        //         common::Quaternionf qm = q_hat + -I.col(j);
+        //         Point ptqp = predictPointLoc(pts1[i], K, D, qp, t_hat);
+        //         Point ptqm = predictPointLoc(pts1[i], K, D, qm, t_hat);
+        //         dp_dqt(0,j) = (ptqp.x - ptqm.x)/(2.0*eps);
+        //         dp_dqt(1,j) = (ptqp.y - ptqm.y)/(2.0*eps);
+
+        //         // Translation
+        //         Vector3f tp = t_hat +  I.col(j);
+        //         Vector3f tm = t_hat + -I.col(j);
+        //         Point pttp = predictPointLoc(pts1[i], K, D, q_hat, tp);
+        //         Point pttm = predictPointLoc(pts1[i], K, D, q_hat, tm);
+        //         dp_dqt(0,j+3) = (pttp.x - pttm.x)/(2.0*eps);
+        //         dp_dqt(1,j+3) = (pttp.y - pttm.y)/(2.0*eps);
+        //     }
+
+        //     // // Analytical derivative of pixel location w.r.t. rotation and translation
+        //     // Matrix<float,2,6> dp_dqt;
+        //     // static const Vector3f e3(0,0,1);
+        //     // static const Matrix3f I3 = Matrix3f::Identity();
+        //     // Vector3f pt1_c = pts1[i].depth * (K_inv * Vector3f(pts1[i].x, pts1[i].y, 1.0)).normalized();
+        //     // Vector3f pt2_c = q_hat.rotp(pt1_c) + t_hat;
+        //     // float z = (K * pt2_c)(2);
+        //     // float zi = 1.0/z;
+        //     // Matrix<float,2,3> M = (zi*K*(I3 - zi*pt2_c*e3.transpose())).topRows(2);
+        //     // dp_dqt.block<2,3>(0,0) = M*common::skew(q_hat.rotp(pt1_c));
+        //     // dp_dqt.block<2,3>(0,3) = M;
+
+        //     // Chain rule the previous derivatives to form a row of the Jacobian
+        //     J.row(i) = derr_dp * dp_dqt;
+        // }
+
+        if (t_hat != t_hat)
+            float a = 1;
 
         // Ensure invertible Hessian, stabilizing the solution
         Eigen::Matrix<float,6,6> H = J.transpose() * W.asDiagonal() * J;
@@ -245,13 +316,13 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 int main(int argc, char* argv[])
 {
     // General parameters
-    const int Nmc = 1000; // Number of Monte Carlo runs
+    const int Nmc = 1; // Number of Monte Carlo runs
     const int Np = 100; // number of points
     const int gn_iters = 50; // maximum number of Gauss Newton iterations
     const float gn_eps = 1e-5; // Nudge for computing derivatives
 
     // Random parameters
-    size_t seed = time(0);
+    size_t seed = 0;//time(0);
     default_random_engine rng(seed);
     uniform_real_distribution<float> dist(-1.0, 1.0);
     srand(seed);
@@ -260,19 +331,15 @@ int main(int argc, char* argv[])
     float r_err = 5.0*M_PI/180.0;
     float pts_spread = 20.0;
     float pts_offset_z = 30.0;
-    float pix_err = 0.5;
+    float pix_err = 0;
     float depth0 = 1.0;
-    int num_unknown_depth = 0.9*Np; // must be <= Np
+    int num_unknown_depth = 0*Np; // must be <= Np
 
     // Camera intrinsics and distortion
-    float img_width = 640;
-    float img_height = 512;
-    float cx = img_width/2;
-    float cy = img_height/2;
-    float fov_x = 60.0*M_PI/180.0;
-    float fov_y = cy/cx*fov_x;
-    float fx = cx/tan(fov_x/2);
-    float fy = cy/tan(fov_y/2);
+    float fx = 1146.61; // horizontal focal length (pixels)
+    float fy = 1149.34; // vertical focal length (pixels)
+    float cx = 679.04;  // horizontal optical center (pixels)
+    float cy = 546.44;  // vertical optical center (pixels)
 
     Matrix3f K = Matrix3f::Identity();
     K(0,0) = fx;
@@ -283,11 +350,11 @@ int main(int argc, char* argv[])
     Matrix3f K_inv = K.inverse();
 
     Matrix<float,5,1> D;
-    D(0) = 0;
-    D(1) = 0;
-    D(2) = 0;
-    D(3) = 0;
-    D(4) = 0;
+    D(0) =  8.655555e-02; // first radial distortion coefficient
+    D(1) = -1.243856e-01; // second radial distortion coefficient
+    D(2) =  1.329729e-03; // first tangential distortion coefficient
+    D(3) =  6.591213e-04; // second tangential distortion coefficient
+    D(4) = -4.242863e-02; // third radial distortion coefficient
 
     vector<int> h_iters;
     vector<float> h_qerr;
@@ -319,6 +386,7 @@ int main(int argc, char* argv[])
         // Project landmarks into each camera image
         vector<Point> pts1(Np), pts2(Np);
         for (int i = 0; i < Np; ++i) {
+            cout << "\ni: " << i << endl;
             pts1[i] = projectToImage(lms1.col(i), K, D);
             pts2[i] = projectToImage(lms2.col(i), K, D);
             pts1[i].x += pix_err*dist(rng);
@@ -330,14 +398,20 @@ int main(int argc, char* argv[])
                 pts2[i].depth = depth0;
             }
             else {
-                triangulatePoint(pts1[i], pts2[i], K_inv, q, t);
+                triangulatePoint(pts1[i], pts2[i], K, D, q, t);
             }
+
+            Vector3f lms1p = projectFromImage(pts1[i], K, D);
+            cout << "truth depth: " << lms1.col(i).norm() << endl;
+            cout << "estim depth: " << pts1[i].depth << endl;
+            cout << "lms1:  " << lms1.col(i).transpose() << endl;
+            cout << "lms1p: " << lms1p.transpose() << endl;
         }
         
         // Solve for relative camera rotation and translation via Gauss Newton optimization
         common::Quaternionf q_hat;
         Vector3f t_hat = Vector3f::Zero();
-        int num_iters = solveQT<Np>(gn_iters, gn_eps, K, K_inv, pts1, pts2, q_hat, t_hat);
+        int num_iters = solveQT<Np>(gn_iters, gn_eps, K, D, pts1, pts2, q_hat, t_hat);
 
         h_iters.push_back(num_iters);
         h_qerr.push_back((q - q_hat).norm()*180/M_PI);

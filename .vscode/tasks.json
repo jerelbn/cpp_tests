@@ -1,0 +1,12 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build debug rel pose",
+            "type": "shell",
+            "command": "if [ ! -d \"build_debug/\" ]; then mkdir build_debug; fi && cd build_debug/ && cmake -DCMAKE_BUILD_TYPE=Debug .. && make rel_pose -j 7"
+        }
+    ]
+}

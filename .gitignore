@@ -2,4 +2,3 @@ build*/
 logs/
 *.user*
 *.m~
-*.vscode
