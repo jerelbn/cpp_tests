@@ -148,7 +148,7 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
             Vector3f pt2_c = q_hat.rotp(pt1_c) + t_hat;
             float z = (K * pt2_c)(2);
             float zi = 1.0/z;
-            Matrix<float,2,3> M = (zi*(I3 - zi*K*pt2_c*e3.transpose())*K).topRows(2);
+            Matrix<float,2,3> M = (zi*K*(I3 - zi*pt2_c*e3.transpose())).topRows(2);
             dp_dqt.block<2,3>(0,0) = M*common::skew(q_hat.rotp(pt1_c));
             dp_dqt.block<2,3>(0,3) = M;
 
@@ -182,7 +182,7 @@ int solveQT(int iters, float eps, const Matrix3f &K, const Matrix3f &K_inv,
 int main(int argc, char* argv[])
 {
     // General parameters
-    const int Nmc = 10000; // Number of Monte Carlo runs
+    const int Nmc = 1000; // Number of Monte Carlo runs
     const int Np = 100; // number of points
     const int gn_iters = 50; // maximum number of Gauss Newton iterations
     const float gn_eps = 1e-5; // Nudge for computing derivatives
@@ -196,11 +196,11 @@ int main(int argc, char* argv[])
     float t_err = 1.0;
     float r_err = 5.0*M_PI/180.0;
     float pts_spread = 20.0;
-    float pts_offset_z = 50.0;
+    float pts_offset_z = 30.0;
     float pix_err = 0.5;
     float depth_err = 0.05; // percent of depth error
-    float zdepth0 = 50.0;
-    int num_unknown_depth = 0.5*Np; // must be <= Np
+    float depth0 = 1.0;
+    int num_unknown_depth = 0.9*Np; // must be <= Np
 
     // Camera intrinsics and distortion
     float img_width = 640;
@@ -262,8 +262,8 @@ int main(int argc, char* argv[])
             pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + pix_err*dist(rng);
             pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + pix_err*dist(rng);
             if (i < num_unknown_depth) {
-                pts1[i].depth = zdepth0;
-                pts2[i].depth = zdepth0;
+                pts1[i].depth = depth0;
+                pts2[i].depth = depth0;
             }
             else {
                 pts1[i].depth = (1.0+depth_err*dist(rng))*lms1.col(i).norm();
