@@ -13,6 +13,69 @@ struct Point
     float depth; // Distance to the Point
 };
 
+void triangulatePoint(Point& pt1, Point& pt2, const Matrix3f& K_inv,
+                      const common::Quaternionf& q, const Vector3f& t)
+{
+    // Find optimal correspondences (Lindstrom paper)
+    static const Eigen::Matrix<float,2,3> S = (Eigen::Matrix<float,2,3>() << 1, 0, 0, 0, 1, 0).finished();
+    Vector3f x1 = K_inv * Vector3f(pt1.x, pt1.y, 1);
+    Vector3f x2 = K_inv * Vector3f(pt2.x, pt2.y, 1);
+    Matrix3f E = common::skew(q.rota(-t)) * q.inverse().R();
+    Matrix2f E_tilde = S * E * S.transpose();
+    Vector2f n1 = S * E * x2;
+    Vector2f n2 = S * E.transpose() * x1;
+    float a = n1.dot(E_tilde * n2);
+    float b = 0.5 * (n1.dot(n1) + n2.dot(n2));
+    float c = x1.dot(E * x2);
+    float d = sqrt(b * b - a * c);
+    float lambda = c / (b + d);
+    Vector2f dx1 = lambda * n1;
+    Vector2f dx2 = lambda * n2;
+    n1 -= E_tilde * dx2;
+    n2 -= E_tilde.transpose() * dx1;
+    dx1 = dx1.dot(n1) / n1.dot(n1) * n1;
+    dx2 = dx2.dot(n2) / n2.dot(n2) * n2;
+    x1 -= S.transpose() * dx1;
+    x2 -= S.transpose() * dx2;
+    
+    // Get depth
+    Vector3f z = x1.cross(q.rota(x2));
+    Vector3f pt1_3d = z.dot(E * x2) / z.dot(z) * x1;
+    pt1.depth = pt1_3d.norm();
+    pt2.depth = (t + q.rotp(pt1_3d)).norm();
+}
+
+Point projectToImage(const Vector3f& lm, const Matrix3f& K, const Matrix<float,5,1>& D)
+{
+    // Unpack intrinsic parameters
+    float fx = K(0,0);
+    float fy = K(1,1);
+    float cx = K(0,2);
+    float cy = K(1,2);
+
+    // Unpack distortion parameters
+    float k1 = D(0);
+    float k2 = D(1);
+    float k3 = D(2);
+    float p1 = D(3);
+    float p2 = D(4);
+
+    // Get normalized coordinates
+    float x = lm(0) / lm(2);
+    float y = lm(1) / lm(2);
+    float r2 = x * x + y * y;
+
+    // Apply distortion model
+    float xd = x*(1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2) + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+    float yd = y*(1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2) + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+
+    // Project into image
+    Point pt;
+    pt.x = fx * xd + cx;
+    pt.y = fy * yd + cy;
+
+    return pt;
+}
 
 Point predictPointLoc(const Point& pt, const Matrix3f& K, const Matrix3f& K_inv,
                       const common::Quaternionf& q, const Vector3f& t)
@@ -41,9 +104,9 @@ vector<Point> predictPointLocs(const vector<Point>& pts, const Matrix3f& K, cons
 
 
 float computeError(const Point &pt_hat, const Point &pt) {
-    float dx = pt.x - pt_hat.x;
-    float dy = pt.y - pt_hat.y;
-    return dx * dx + dy * dy;
+    float dx = (int)pt.x - (int)pt_hat.x;
+    float dy = (int)pt.y - (int)pt_hat.y;
+    return sqrt(dx * dx + dy * dy);
 }
 
 
@@ -198,7 +261,6 @@ int main(int argc, char* argv[])
     float pts_spread = 20.0;
     float pts_offset_z = 30.0;
     float pix_err = 0.5;
-    float depth_err = 0.05; // percent of depth error
     float depth0 = 1.0;
     int num_unknown_depth = 0.9*Np; // must be <= Np
 
@@ -257,17 +319,18 @@ int main(int argc, char* argv[])
         // Project landmarks into each camera image
         vector<Point> pts1(Np), pts2(Np);
         for (int i = 0; i < Np; ++i) {
-            pts1[i].x = fx*lms1(0,i)/lms1(2,i) + cx + pix_err*dist(rng);
-            pts1[i].y = fy*lms1(1,i)/lms1(2,i) + cy + pix_err*dist(rng);
-            pts2[i].x = fx*lms2(0,i)/lms2(2,i) + cx + pix_err*dist(rng);
-            pts2[i].y = fy*lms2(1,i)/lms2(2,i) + cy + pix_err*dist(rng);
+            pts1[i] = projectToImage(lms1.col(i), K, D);
+            pts2[i] = projectToImage(lms2.col(i), K, D);
+            pts1[i].x += pix_err*dist(rng);
+            pts1[i].y += pix_err*dist(rng);
+            pts2[i].x += pix_err*dist(rng);
+            pts2[i].y += pix_err*dist(rng);
             if (i < num_unknown_depth) {
                 pts1[i].depth = depth0;
                 pts2[i].depth = depth0;
             }
             else {
-                pts1[i].depth = (1.0+depth_err*dist(rng))*lms1.col(i).norm();
-                pts2[i].depth = (1.0+depth_err*dist(rng))*lms2.col(i).norm();
+                triangulatePoint(pts1[i], pts2[i], K_inv, q, t);
             }
         }
         
